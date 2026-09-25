@@ -846,15 +846,34 @@ class _AgentLoop:
         original_key: _ToolUseKey,
         tool_result_event: ToolResultEvent,
     ) -> bool:
-        """Wait out reconnect activity, then deliver the completed tool result."""
+        """Wait for a stable connection and an idle turn when semantic recovery is required."""
         while True:
+            if not self._started:
+                return False
             await self._send_gate.wait()
             async with self._connection_lock:
                 if not self._started:
                     return False
                 if not self._send_gate.is_set():
                     continue
-                return await self._deliver_tool_result_on_connection(original_key, tool_result_event)
+                if await self._semantic_recovery_must_wait(original_key):
+                    logger.debug(
+                        "tool_use_id=<%s> | waiting for response boundary before semantic recovery",
+                        original_key[1],
+                    )
+                else:
+                    return await self._deliver_tool_result_on_connection(original_key, tool_result_event)
+
+            await self._turn_complete.wait()
+
+    async def _semantic_recovery_must_wait(self, original_key: _ToolUseKey) -> bool:
+        """Return whether stale-ID recovery must wait for the active response to finish."""
+        async with self._tool_lock:
+            running_tool = self._running_tools.get(original_key)
+            if running_tool is None:
+                return False
+            delivery_key = running_tool.replacement_key or original_key
+            return delivery_key[0] != self._generation and not self._turn_complete.is_set()
 
     async def _send_model_content(
         self,

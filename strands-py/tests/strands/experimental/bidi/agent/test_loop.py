@@ -1360,6 +1360,87 @@ async def test_semantic_recovery_matches_late_exact_reissue(loop, agent, agenera
 
 
 @pytest.mark.asyncio
+async def test_semantic_recovery_waits_for_active_response_boundary(loop, agent, agenerator):
+    """Semantic recovery does not interrupt an unrelated response already in progress."""
+    agent.model.receive = unittest.mock.Mock(return_value=agenerator([]))
+    await loop.start()
+    loop._reconnect_timer.cancel()
+
+    tool_use: ToolUse = {"toolUseId": "old", "name": "time_tool", "input": {}}
+    tool_use_key = await loop._register_tool_use(tool_use, loop._generation)
+    assert tool_use_key is not None
+    tool_result = ToolResultEvent(ToolResult(toolUseId="old", status="success", content=[{"text": "12:00"}]))
+
+    loop._generation += 1
+    loop._response_active = True
+    loop._update_turn_state()
+    delivery_task = asyncio.create_task(loop._deliver_tool_result(tool_use_key, tool_result))
+    await asyncio.sleep(0)
+
+    agent.model.send.assert_not_awaited()
+
+    loop._response_active = False
+    loop._update_turn_state()
+    tru_retained = await asyncio.wait_for(delivery_task, timeout=0.5)
+
+    assert tru_retained is True
+    agent.model.send.assert_awaited_once()
+    assert isinstance(agent.model.send.await_args.args[0], TextBlock)
+
+    await loop.stop()
+
+
+@pytest.mark.asyncio
+async def test_semantic_recovery_waiting_for_boundary_exits_when_loop_stops(loop, agent, agenerator):
+    """Stopping the loop wakes semantic recovery waiting behind an active response."""
+    agent.model.receive = unittest.mock.Mock(return_value=agenerator([]))
+    await loop.start()
+    loop._reconnect_timer.cancel()
+
+    tool_use: ToolUse = {"toolUseId": "old", "name": "time_tool", "input": {}}
+    tool_use_key = await loop._register_tool_use(tool_use, loop._generation)
+    assert tool_use_key is not None
+    tool_result = ToolResultEvent(ToolResult(toolUseId="old", status="success", content=[{"text": "12:00"}]))
+
+    loop._generation += 1
+    loop._response_active = True
+    loop._update_turn_state()
+    delivery_task = asyncio.create_task(loop._deliver_tool_result(tool_use_key, tool_result))
+    await asyncio.sleep(0)
+
+    await loop.stop()
+    tru_retained = await asyncio.wait_for(delivery_task, timeout=0.5)
+
+    assert tru_retained is False
+    agent.model.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_native_tool_result_does_not_wait_for_active_response_boundary(loop, agent, agenerator):
+    """A provider-recognized tool result remains immediate while another response is active."""
+    agent.model.receive = unittest.mock.Mock(return_value=agenerator([]))
+    await loop.start()
+    loop._reconnect_timer.cancel()
+
+    tool_use: ToolUse = {"toolUseId": "current", "name": "time_tool", "input": {}}
+    tool_use_key = await loop._register_tool_use(tool_use, loop._generation)
+    assert tool_use_key is not None
+    tool_result = ToolResultEvent(ToolResult(toolUseId="current", status="success", content=[{"text": "12:00"}]))
+
+    loop._response_active = True
+    loop._update_turn_state()
+    tru_retained = await asyncio.wait_for(loop._deliver_tool_result(tool_use_key, tool_result), timeout=0.5)
+
+    assert tru_retained is False
+    agent.model.send.assert_awaited_once()
+    tru_result = agent.model.send.await_args.args[0]
+    assert isinstance(tru_result, ToolResultBlock)
+    assert tru_result.tool_use_id == "current"
+
+    await loop.stop()
+
+
+@pytest.mark.asyncio
 async def test_response_complete_expires_unclaimed_semantic_recovery(loop, agent, agenerator):
     """A recovered result expires when its prompted response completes without a reissue."""
     agent.model.receive = unittest.mock.Mock(return_value=agenerator([]))
@@ -1447,22 +1528,29 @@ async def test_recovered_results_expire_with_their_own_responses(loop, agent, ag
     assert await loop._restart_connection(None, loop._generation) is True
     for _ in range(20):
         await asyncio.sleep(0)
+        if agent.model.send.await_count == 1:
+            break
+
+    assert agent.model.send.await_count == 1
+    await loop._bind_recovery_response(loop._generation, "first-response")
+    await loop._clear_recovered_tool_result("first-response")
+
+    assert len(loop._running_tools) == 1
+
+    loop._awaiting_response = False
+    loop._update_turn_state()
+    for _ in range(20):
+        await asyncio.sleep(0)
         if agent.model.send.await_count == 2:
             break
 
     tru_sent_events = [call.args[0] for call in agent.model.send.await_args_list]
     assert len(tru_sent_events) == 2
     assert all(isinstance(event, TextBlock) for event in tru_sent_events)
-    assert set(loop._running_tools) == {first_key, second_key}
+    assert len(loop._running_tools) == 1
 
-    await loop._bind_recovery_response(loop._generation, "shared-response")
-    await loop._bind_recovery_response(loop._generation, "shared-response")
-    await loop._clear_recovered_tool_result("shared-response")
-
-    assert first_key not in loop._running_tools
-    assert second_key in loop._running_tools
-
-    await loop._clear_recovered_tool_result("shared-response")
+    await loop._bind_recovery_response(loop._generation, "second-response")
+    await loop._clear_recovered_tool_result("second-response")
     assert loop._running_tools == {}
 
     await loop.stop()
