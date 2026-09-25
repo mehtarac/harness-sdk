@@ -29,7 +29,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from ...agent import Agent
     from ...background_tasks._background_tasks import _BackgroundTasks
     from ...background_tasks.in_process._manager import _MiddlewareInterrupt
-    from ...experimental.bidi import BidiAgent
+    from ...experimental.bidi.agent import BidiAgent
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,17 @@ class ToolExecutor(abc.ABC):
         if not ToolExecutor._is_agent(agent):
             return False
         return bool(cast("Agent", agent)._observe_cancellation())
+
+    @staticmethod
+    def _preserve_bidi_tool_use_id(agent: LocalAgent, tool_use_id: str, result: ToolResult) -> ToolResult:
+        """Reject hook-modified provider correlation IDs for bidi tool results."""
+        if ToolExecutor._is_agent(agent) or result.get("toolUseId") == tool_use_id:
+            return result
+        return {
+            "toolUseId": tool_use_id,
+            "status": "error",
+            "content": [{"text": "Bidi hooks cannot modify provider toolUseId values"}],
+        }
 
     async def _execute_background(
         self,
@@ -187,6 +198,7 @@ class ToolExecutor(abc.ABC):
         """
         logger.debug("tool_use=<%s> | streaming", tool_use)
         tool_name = tool_use["name"]
+        provider_tool_use_id = tool_use["toolUseId"]
         structured_output_context = structured_output_context or StructuredOutputContext()
 
         tool_func = _lookup_tool(agent, tool_name)
@@ -219,11 +231,12 @@ class ToolExecutor(abc.ABC):
 
         # Retry loop for tool execution - hooks can set after_event.retry = True to retry
         while True:
+            hook_tool_use = tool_use if ToolExecutor._is_agent(agent) else cast(ToolUse, {**tool_use})
             before_event, interrupts = await agent.hooks.invoke_callbacks_async(
                 BeforeToolCallEvent[LocalAgent](
                     agent=agent,
                     selected_tool=tool_func,
-                    tool_use=tool_use,
+                    tool_use=hook_tool_use,
                     invocation_state=invocation_state,
                 )
             )
@@ -254,8 +267,9 @@ class ToolExecutor(abc.ABC):
                         cancel_message=cancel_message,
                     )
                 )
-                yield ToolResultEvent(after_event.result)
-                tool_results.append(after_event.result)
+                result = ToolExecutor._preserve_bidi_tool_use_id(agent, provider_tool_use_id, after_event.result)
+                yield ToolResultEvent(result)
+                tool_results.append(result)
                 return
 
             try:
@@ -263,6 +277,9 @@ class ToolExecutor(abc.ABC):
                 selected_tool = before_event.selected_tool
                 tool_use = before_event.tool_use
                 invocation_state = before_event.invocation_state
+                if not ToolExecutor._is_agent(agent) and tool_use.get("toolUseId") != provider_tool_use_id:
+                    tool_use = cast(ToolUse, {**tool_use, "toolUseId": provider_tool_use_id})
+                    raise ValueError("Bidi hooks cannot modify provider toolUseId values")
 
                 if selected_tool is tool_func and tool_use["name"] != tool_name:
                     selected_tool = _lookup_tool(agent, tool_use["name"])
@@ -280,6 +297,7 @@ class ToolExecutor(abc.ABC):
                     result = await background_tasks.submit_tool_call(
                         tool_use, invocation_state, pass_id, cast(AgentTool, selected_tool)
                     )
+                    result = ToolExecutor._preserve_bidi_tool_use_id(agent, provider_tool_use_id, result)
                     yield ToolResultEvent(result, backgrounded=True)
                     tool_results.append(result)
                     return
@@ -375,8 +393,9 @@ class ToolExecutor(abc.ABC):
                     logger.debug("tool_name=<%s> | retry requested, retrying tool call", tool_name)
                     continue
 
-                yield ToolResultEvent(after_event.result, exception=after_event.exception)
-                tool_results.append(after_event.result)
+                result = ToolExecutor._preserve_bidi_tool_use_id(agent, provider_tool_use_id, after_event.result)
+                yield ToolResultEvent(result, exception=after_event.exception)
+                tool_results.append(result)
                 return
 
             except InterruptException as interrupt_exception:
@@ -413,8 +432,9 @@ class ToolExecutor(abc.ABC):
                 if ToolExecutor._should_retry(agent, after_event):
                     logger.debug("tool_name=<%s> | retry requested after exception, retrying tool call", tool_name)
                     continue
-                yield ToolResultEvent(after_event.result, exception=after_event.exception)
-                tool_results.append(after_event.result)
+                result = ToolExecutor._preserve_bidi_tool_use_id(agent, provider_tool_use_id, after_event.result)
+                yield ToolResultEvent(result, exception=after_event.exception)
+                tool_results.append(result)
                 return
 
     @staticmethod
@@ -434,7 +454,7 @@ class ToolExecutor(abc.ABC):
             agent: The agent for which the tool is being executed.
             tool_use: Metadata and inputs for the tool to be executed.
             tool_results: List of tool results from each tool execution.
-            cycle_trace: Trace object for the current event loop cycle, if available.
+            cycle_trace: Trace object for the current event loop cycle.
             cycle_span: Span object for tracing the cycle.
             invocation_state: Context for the tool invocation.
             structured_output_context: Context for structured output management.
@@ -447,6 +467,7 @@ class ToolExecutor(abc.ABC):
         structured_output_context = structured_output_context or StructuredOutputContext()
 
         tracer = get_tracer()
+
         trace_attributes = cast("Agent", agent).trace_attributes if ToolExecutor._is_agent(agent) else None
         tool_call_span = tracer.start_tool_call_span(tool_use, cycle_span, custom_trace_attributes=trace_attributes)
         tool_trace = (
@@ -469,12 +490,10 @@ class ToolExecutor(abc.ABC):
 
                 if last_event is None:
                     raise RuntimeError("tool execution stream completed without an event")
-
                 if isinstance(last_event, ToolInterruptEvent):
-                    tool_duration = time.time() - tool_start_time
                     if ToolExecutor._is_agent(agent) and tool_trace is not None:
                         cast("Agent", agent).event_loop_metrics.add_tool_usage(
-                            tool_use, tool_duration, tool_trace, False
+                            tool_use, time.time() - tool_start_time, tool_trace, False
                         )
                     if cycle_trace is not None and tool_trace is not None:
                         cycle_trace.add_child(tool_trace)
@@ -483,20 +502,18 @@ class ToolExecutor(abc.ABC):
                 result_event = cast(ToolResultEvent, last_event)
                 tool_result = result_event.tool_result
                 tool_error = result_event.exception
-
-                tool_success = tool_result.get("status") == "success"
-                tool_duration = time.time() - tool_start_time
-                message = Message(role="user", content=[{"toolResult": tool_result}])
-                # A background dispatch acknowledgement is not the tool running; the run records its own
-                # metrics and trace, so the ack only marks its span.
                 if result_event.backgrounded:
                     tool_call_span.set_attribute("strands.tool.backgrounded", True)
-                else:
-                    if ToolExecutor._is_agent(agent) and tool_trace is not None:
-                        cast("Agent", agent).event_loop_metrics.add_tool_usage(
-                            tool_use, tool_duration, tool_trace, tool_success, message
-                        )
-                    if cycle_trace is not None and tool_trace is not None:
+                elif ToolExecutor._is_agent(agent) and tool_trace is not None:
+                    message = Message(role="user", content=[{"toolResult": tool_result}])
+                    cast("Agent", agent).event_loop_metrics.add_tool_usage(
+                        tool_use,
+                        time.time() - tool_start_time,
+                        tool_trace,
+                        tool_result.get("status") == "success",
+                        message,
+                    )
+                    if cycle_trace is not None:
                         cycle_trace.add_child(tool_trace)
         except Exception as error:
             tool_error = error
@@ -522,7 +539,7 @@ class ToolExecutor(abc.ABC):
             agent: The agent for which tools are being executed.
             tool_uses: Metadata and inputs for the tools to be executed.
             tool_results: List of tool results from each tool execution.
-            cycle_trace: Trace object for the current event loop cycle, if available.
+            cycle_trace: Trace object for the current event loop cycle.
             cycle_span: Span object for tracing the cycle.
             invocation_state: Context for the tool invocation.
             structured_output_context: Context for structured output management.

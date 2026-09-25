@@ -61,6 +61,13 @@ describe('ContextManager', () => {
     })
   })
 
+  describe('from', () => {
+    it('returns a ContextManager instance as-is', () => {
+      const cm = new ContextManager({ strategies: [{ name: 'custom', apply: async () => false }] })
+      expect(ContextManager.from(cm)).toBe(cm)
+    })
+  })
+
   describe('initAgent', () => {
     it('registers AfterModelCallEvent hook', async () => {
       const cm = new ContextManager()
@@ -163,7 +170,7 @@ describe('ContextManager', () => {
       expect(event.retry).toBe(true)
     })
 
-    it('does not truncate when strategies bring utilization below 1.0', async () => {
+    it('does not truncate on non-overflow when utilization is below 1.0', async () => {
       const messages = [
         new Message({ role: 'user', content: [new TextBlock('system')] }),
         new Message({ role: 'assistant', content: [new TextBlock('response 1')] }),
@@ -173,7 +180,40 @@ describe('ContextManager', () => {
         new Message({ role: 'assistant', content: [new TextBlock('response 3')] }),
       ]
 
-      const strategy = { name: 'noop', apply: async () => true }
+      const strategy = { name: 'test', apply: async () => false }
+      const cm = new ContextManager({ strategies: [strategy] })
+      const agent = makeMockAgent({
+        messages,
+        countTokens: async () => 100,
+        estimateUtilization: () => 0.5,
+      })
+      await cm.initAgent(agent)
+
+      const originalLength = messages.length
+      const event = new BeforeModelCallEvent({
+        agent,
+        model: agent.model,
+        invocationState: {},
+        projectedInputTokens: 100,
+      })
+      await invokeTrackedHook(agent, event)
+
+      expect(messages.length).toBe(originalLength)
+    })
+
+    it('emergency truncate fires when estimate undercounts on overflow', async () => {
+      const messages = [
+        new Message({ role: 'user', content: [new TextBlock('system')] }),
+        new Message({ role: 'assistant', content: [new TextBlock('response 1')] }),
+        new Message({ role: 'user', content: [new TextBlock('msg 2')] }),
+        new Message({ role: 'assistant', content: [new TextBlock('response 2')] }),
+        new Message({ role: 'user', content: [new TextBlock('msg 3')] }),
+        new Message({ role: 'assistant', content: [new TextBlock('response 3')] }),
+        new Message({ role: 'user', content: [new TextBlock('msg 4')] }),
+        new Message({ role: 'assistant', content: [new TextBlock('response 4')] }),
+      ]
+
+      const strategy = { name: 'noop', apply: async () => false }
       const cm = new ContextManager({ strategies: [strategy] })
       const agent = makeMockAgent({
         messages,
@@ -186,7 +226,8 @@ describe('ContextManager', () => {
       const event = makeOverflowEvent(agent)
       await invokeTrackedHook(agent, event)
 
-      expect(messages.length).toBe(originalLength)
+      expect(messages.length).toBeLessThan(originalLength)
+      expect(event.retry).toBe(true)
     })
 
     it('caps retries at 3 and stops setting retry', async () => {

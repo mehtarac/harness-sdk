@@ -7,10 +7,9 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import BaseModel
 
-from strands.experimental.bidi import Restartable
-from strands.experimental.bidi.models.configs import AudioConfig
-from strands.experimental.bidi.models.model import AudioCapable, BidiModel, _validate_tool_result_message
-from strands.experimental.bidi.types.events import BidiInputEvent, BidiOutputEvent
+from strands.experimental.bidi.models import AudioCapable, AudioConfig, BidiModel, Restartable
+from strands.experimental.bidi.models.model import _validate_tool_result_message
+from strands.experimental.bidi.types import BidiContentBlock, BidiContentDelta, BidiOutputEvent
 from strands.models import Model
 from strands.types.content import Message, Messages
 from strands.types.tools import ToolSpec
@@ -50,7 +49,7 @@ class _TestBidiModel(BidiModel):
 
         return events()
 
-    async def send(self, content: BidiInputEvent) -> None:
+    async def send(self, content: BidiContentBlock | BidiContentDelta) -> None:
         pass
 
     async def send_tool_results(self, message: Message) -> None:
@@ -60,10 +59,8 @@ class _TestBidiModel(BidiModel):
 class _AudioBidiModel(_TestBidiModel):
     def get_audio_config(self) -> AudioConfig:
         return {
-            "input_rate": 16000,
-            "output_rate": 24000,
-            "channels": 1,
-            "format": "pcm",
+            "input": {"sample_rate": 16000, "channels": 1, "format": "pcm"},
+            "output": {"sample_rate": 24000, "channels": 1, "format": "pcm"},
         }
 
 
@@ -106,8 +103,6 @@ def test_structured_output_raises_not_implemented():
 
 
 def test_incomplete_bidi_model_cannot_be_instantiated():
-    """Third-party models must implement the grouped tool-result contract."""
-
     class _IncompleteBidiModel(BidiModel):
         def update_config(self, **model_config: Any) -> None:
             pass
@@ -115,13 +110,7 @@ def test_incomplete_bidi_model_cannot_be_instantiated():
         def get_config(self) -> dict[str, Any]:
             return {"model_id": "incomplete"}
 
-        async def start(
-            self,
-            system_prompt: str | None = None,
-            tools: list[ToolSpec] | None = None,
-            messages: Messages | None = None,
-            **kwargs: Any,
-        ) -> None:
+        async def start(self, **kwargs: Any) -> None:
             pass
 
         async def stop(self) -> None:
@@ -134,16 +123,15 @@ def test_incomplete_bidi_model_cannot_be_instantiated():
 
             return events()
 
-        async def send(self, content: BidiInputEvent) -> None:
+        async def send(self, content: BidiContentBlock | BidiContentDelta) -> None:
             pass
 
-    with pytest.raises(TypeError, match="abstract method 'send_tool_results'"):
+    with pytest.raises(TypeError, match="abstract method"):
         _IncompleteBidiModel()
 
 
 @pytest.mark.asyncio
 async def test_bidi_model_spec_exposes_async_grouped_tool_results():
-    """BidiModel mocks expose the grouped result method as an async API."""
     model = AsyncMock(spec=BidiModel)
     message: Message = {
         "role": "user",
@@ -156,10 +144,10 @@ async def test_bidi_model_spec_exposes_async_grouped_tool_results():
 
 
 @pytest.mark.parametrize(
-    "message,error",
+    ("message", "error"),
     [
         ({"role": "assistant", "content": []}, "role"),
-        ({"role": "user", "content": []}, "non-empty"),
+        ({"role": "user", "content": []}, "empty"),
         ({"role": "user", "content": [{"text": "invalid"}]}, "only 'toolResult'"),
         (
             {"role": "user", "content": [{"toolResult": {"toolUseId": "", "status": "success", "content": []}}]},
@@ -176,13 +164,11 @@ async def test_bidi_model_spec_exposes_async_grouped_tool_results():
     ],
 )
 def test_validate_tool_result_message_rejects_invalid_groups(message, error):
-    """Grouped provider writes reject malformed messages before sending."""
     with pytest.raises(ValueError, match=error):
         _validate_tool_result_message(message)
 
 
 def test_validate_tool_result_message_preserves_order_and_rejects_duplicates():
-    """Grouped result validation preserves source order and enforces unique IDs."""
     message: Message = {
         "role": "user",
         "content": [

@@ -21,8 +21,9 @@ from typing import Any, NoReturn, Protocol, cast, runtime_checkable
 from ....models.model import Model
 from ....types.content import Message, Messages
 from ....types.tools import ToolResult, ToolSpec
-from ..types.events import BidiInputEvent, BidiOutputEvent
-from .configs import AudioConfig, BidiConnectionConfig
+from ..types.content import BidiContentBlock, BidiContentDelta
+from ..types.events import BidiOutputEvent
+from .configs import AudioConfig, ConnectionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,7 @@ def _validate_tool_result_message(message: Message) -> list[ToolResult]:
 
     content = message.get("content")
     if not isinstance(content, list) or not content:
-        raise ValueError("tool-result message content must be a non-empty list")
+        raise ValueError("tool-result message content must not be empty")
 
     tool_results: list[ToolResult] = []
     tool_use_ids: set[str] = set()
@@ -45,16 +46,13 @@ def _validate_tool_result_message(message: Message) -> list[ToolResult]:
         tool_result = block["toolResult"]
         if not isinstance(tool_result, dict):
             raise ValueError(f"tool-result message content block {index} must contain an object-shaped tool result")
-
         tool_use_id = tool_result.get("toolUseId")
         if not isinstance(tool_use_id, str) or not tool_use_id:
             raise ValueError(f"tool-result message content block {index} must have a non-empty 'toolUseId'")
         if tool_use_id in tool_use_ids:
             raise ValueError(f"tool-result message contains duplicate toolUseId '{tool_use_id}'")
-
         if tool_result.get("status") not in ("success", "error"):
             raise ValueError(f"tool-result message content block {index} must have status 'success' or 'error'")
-
         result_content = tool_result.get("content")
         if not isinstance(result_content, list) or not all(isinstance(item, dict) for item in result_content):
             raise ValueError(f"tool-result message content block {index} must have list-shaped 'content'")
@@ -111,9 +109,9 @@ class BidiModel(Model, abc.ABC):
         """Get the configured model identifier."""
         return cast(str, self.get_config()["model_id"])
 
-    def get_connection_config(self) -> BidiConnectionConfig:
+    def get_connection_config(self) -> ConnectionConfig:
         """Get the configured reconnect timing, or an empty config if unspecified."""
-        return cast(BidiConnectionConfig, self.get_config().get("connection", {}))
+        return cast(ConnectionConfig, self.get_config().get("connection", {}))
 
     def structured_output(self, *args: Any, **kwargs: Any) -> NoReturn:
         """Raise because bidirectional models do not support structured output."""
@@ -162,13 +160,11 @@ class BidiModel(Model, abc.ABC):
     def receive(self) -> AsyncIterable[BidiOutputEvent]:
         """Receive streaming events from the model.
 
-        Continuously yields events from the model as they arrive over the connection.
-        Events are normalized to a provider-agnostic format for uniform processing.
-        This method should be called in a loop or async task to process model responses.
+        Each transcript has start and stop events, with zero or more deltas between
+        them, sharing a content_id unique within the connection. Transcript streams
+        may interleave, and user transcripts may arrive outside response boundaries.
 
         The stream continues until the connection is closed or an error occurs.
-        Providers must emit ``ToolUseStreamEvent`` before
-        ``BidiToolUsesCompleteEvent`` for every executable tool group.
 
         Yields:
             BidiOutputEvent: Standardized event objects containing audio output,
@@ -180,25 +176,23 @@ class BidiModel(Model, abc.ABC):
     # pragma: no cover
     async def send(
         self,
-        content: BidiInputEvent,
+        content: BidiContentBlock | BidiContentDelta,
     ) -> None:
-        """Send user input to the model over the active connection.
+        """Send content to the model over the active connection.
 
-        Tool results are submitted through ``send_tool_results()`` so providers receive
-        one complete result group.
+        Transmits user input to the model during an active streaming session.
 
         Args:
-            content: The user input to send. Must be one of:
-
-                - BidiTextInputEvent: Text message from the user
-                - BidiAudioInputEvent: Audio data for speech input
-                - BidiImageInputEvent: Image data for visual understanding
+            content: A TextBlock, AudioDelta, or ImageBlock.
 
         Example:
             ```
-            await model.send(BidiTextInputEvent(text="Hello", role="user"))
-            await model.send(BidiAudioInputEvent(audio=bytes, format="pcm", sample_rate=16000, channels=1))
-            await model.send(BidiImageInputEvent(image=bytes, mime_type="image/jpeg", encoding="raw"))
+            from strands.experimental.bidi.types import AudioDelta
+            from strands.types.content import TextBlock
+            from strands.types.media import ImageBlock
+            await model.send(TextBlock("Hello"))
+            await model.send(AudioDelta(format="pcm", source={"bytes": audio_bytes}))
+            await model.send(ImageBlock(format="jpeg", source={"bytes": image_bytes}))
             ```
         """
         pass
@@ -221,8 +215,8 @@ class BidiModel(Model, abc.ABC):
         pass
 
 
-class BidiModelTimeoutError(Exception):
-    """Model timeout error.
+class ConnectionTimeoutError(Exception):
+    """Persistent model connection timeout.
 
     Bidirectional models are often configured with a connection time limit. Bedrock Nova Sonic, for example, keeps the
     connection open for 8 minutes max. Upon receiving a timeout, the agent loop is configured to restart the model

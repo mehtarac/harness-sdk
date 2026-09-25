@@ -134,7 +134,20 @@ class MessageAddedEvent(HookEvent[_LocalAgentT]):
 
 
 @dataclass
-class BeforeToolsEvent(HookEvent[_LocalAgentT], _Interruptible):
+class MessageUpdatedEvent(HookEvent[_LocalAgentT]):
+    """Event triggered after the framework replaces a message.
+
+    Attributes:
+        tracking_id: Stable identifier of the replaced message.
+        message: Replacement message.
+    """
+
+    tracking_id: str
+    message: Message
+
+
+@dataclass
+class BeforeToolsEvent(HookEvent, _Interruptible):
     """Event triggered before executing tools.
 
     This event is fired when the model returns tool use blocks that need to be executed.
@@ -170,7 +183,7 @@ class BeforeToolsEvent(HookEvent[_LocalAgentT], _Interruptible):
 
 
 @dataclass
-class AfterToolsEvent(HookEvent[_LocalAgentT]):
+class AfterToolsEvent(HookEvent):
     """Event triggered after all tools complete execution.
 
     This event is fired after tool results are collected and ready to be added to conversation.

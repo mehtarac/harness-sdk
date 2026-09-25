@@ -13,7 +13,7 @@ from ._executor import ToolExecutor
 
 if TYPE_CHECKING:  # pragma: no cover
     from ...agent import Agent
-    from ...experimental.bidi import BidiAgent
+    from ...experimental.bidi.agent import BidiAgent
     from ..structured_output._structured_output_context import StructuredOutputContext
 
 
@@ -37,7 +37,7 @@ class ConcurrentToolExecutor(ToolExecutor):
             agent: The agent for which tools are being executed.
             tool_uses: Metadata and inputs for the tools to be executed.
             tool_results: List of tool results from each tool execution.
-            cycle_trace: Trace object for the current event loop cycle, if available.
+            cycle_trace: Trace object for the current event loop cycle.
             cycle_span: Span object for tracing the cycle.
             invocation_state: Context for the tool invocation.
             structured_output_context: Context for structured output handling.
@@ -110,7 +110,7 @@ class ConcurrentToolExecutor(ToolExecutor):
             agent: The agent executing the tool.
             tool_use: Tool use metadata and inputs.
             tool_results: List of tool results from each tool execution.
-            cycle_trace: Trace object for the current event loop cycle, if available.
+            cycle_trace: Trace object for the current event loop cycle.
             cycle_span: Span object for tracing the cycle.
             invocation_state: Context for tool execution.
             task_id: Unique identifier for this task.

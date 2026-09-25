@@ -6,7 +6,7 @@ Tests that spans are created, closed, and attributed correctly for:
 - Response lifecycle (ResponseStart/ResponseComplete)
 - Tool call execution
 - Connection restart on timeout
-- Interruption events
+- Barge-in events
 - Usage accumulation
 """
 
@@ -18,25 +18,26 @@ from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.trace import StatusCode
 
+import strands.experimental.bidi._telemetry as _telemetry
 from strands import tool
-from strands.experimental.bidi import BidiAgent, _telemetry
-from strands.experimental.bidi.hooks.events import (
+from strands.experimental.bidi.agent import BidiAgent
+from strands.experimental.bidi.hooks import (
     BidiAfterConnectionRestartEvent,
     BidiBeforeConnectionRestartEvent,
 )
-from strands.experimental.bidi.models import BidiModel, BidiModelTimeoutError
-from strands.experimental.bidi.types.events import (
-    BidiAudioStreamEvent,
-    BidiInterruptionEvent,
-    BidiResponseCompleteEvent,
+from strands.experimental.bidi.models import BidiModel, ConnectionTimeoutError
+from strands.experimental.bidi.types import (
+    BidiAudioDeltaEvent,
+    BidiBargeInEvent,
+    BidiConnectionStopEvent,
     BidiResponseStartEvent,
-    BidiTextInputEvent,
+    BidiResponseStopEvent,
     BidiToolUsesCompleteEvent,
+    BidiTranscriptStartEvent,
     BidiUsageEvent,
 )
 from strands.telemetry.tracer import Tracer
-from strands.tools.executors._executor import ToolExecutor
-from strands.types._events import ToolResultMessageEvent
+from strands.types._events import ToolResultMessageEvent, ToolUseStreamEvent
 
 
 class _InMemoryExporter(SpanExporter):
@@ -169,7 +170,7 @@ async def test_response_span_lifecycle(loop, agent, agenerator):
     """Response spans open on ResponseStart and close on ResponseComplete."""
     events = [
         BidiResponseStartEvent(response_id="resp-1"),
-        BidiResponseCompleteEvent(response_id="resp-1", stop_reason="complete"),
+        BidiResponseStopEvent(response_id="resp-1", stop_reason="end_turn"),
     ]
     agent.model.receive = unittest.mock.Mock(return_value=agenerator(events))
 
@@ -178,7 +179,7 @@ async def test_response_span_lifecycle(loop, agent, agenerator):
     received = []
     async for event in loop.receive():
         received.append(event)
-        if isinstance(event, BidiResponseCompleteEvent):
+        if isinstance(event, BidiResponseStopEvent):
             break
 
     assert len(received) == 2
@@ -191,14 +192,14 @@ async def test_response_span_records_stop_reason(loop, agent, agenerator, otel_s
     """Response span captures the stop_reason as finish_reason attribute."""
     events = [
         BidiResponseStartEvent(response_id="resp-2"),
-        BidiResponseCompleteEvent(response_id="resp-2", stop_reason="interrupted"),
+        BidiResponseStopEvent(response_id="resp-2", stop_reason="barge_in"),
     ]
     agent.model.receive = unittest.mock.Mock(return_value=agenerator(events))
 
     await loop.start()
 
     async for event in loop.receive():
-        if isinstance(event, BidiResponseCompleteEvent):
+        if isinstance(event, BidiResponseStopEvent):
             break
 
     await loop.stop()
@@ -206,7 +207,7 @@ async def test_response_span_records_stop_reason(loop, agent, agenerator, otel_s
     spans = otel_setup.get_finished_spans()
     response_spans = [s for s in spans if "bidi_response" in s.name]
     assert len(response_spans) == 1
-    assert response_spans[0].attributes["gen_ai.response.finish_reason"] == "interrupted"
+    assert response_spans[0].attributes["gen_ai.response.finish_reason"] == "barge_in"
 
 
 @pytest.mark.asyncio
@@ -214,15 +215,15 @@ async def test_response_span_records_time_to_first_audio(loop, agent, agenerator
     """Response span records time to first audio when audio is emitted."""
     events = [
         BidiResponseStartEvent(response_id="resp-audio"),
-        BidiAudioStreamEvent(audio="", format="pcm", sample_rate=24000, channels=1),
-        BidiResponseCompleteEvent(response_id="resp-audio", stop_reason="complete"),
+        BidiAudioDeltaEvent(audio="", format="pcm", sample_rate=24000, channels=1),
+        BidiResponseStopEvent(response_id="resp-audio", stop_reason="end_turn"),
     ]
     agent.model.receive = unittest.mock.Mock(return_value=agenerator(events))
 
     await loop.start()
 
     async for event in loop.receive():
-        if isinstance(event, BidiResponseCompleteEvent):
+        if isinstance(event, BidiResponseStopEvent):
             break
 
     await loop.stop()
@@ -238,14 +239,14 @@ async def test_response_span_omits_time_to_first_audio_when_no_audio(loop, agent
     """Response span omits the time-to-first-audio attribute when no audio is emitted."""
     events = [
         BidiResponseStartEvent(response_id="resp-noaudio"),
-        BidiResponseCompleteEvent(response_id="resp-noaudio", stop_reason="complete"),
+        BidiResponseStopEvent(response_id="resp-noaudio", stop_reason="end_turn"),
     ]
     agent.model.receive = unittest.mock.Mock(return_value=agenerator(events))
 
     await loop.start()
 
     async for event in loop.receive():
-        if isinstance(event, BidiResponseCompleteEvent):
+        if isinstance(event, BidiResponseStopEvent):
             break
 
     await loop.stop()
@@ -260,7 +261,10 @@ async def test_response_span_omits_time_to_first_audio_when_no_audio(loop, agent
 async def test_tool_call_span_created(loop, agent, agenerator, otel_setup):
     """Tool call span wraps tool execution."""
     tool_use = {"toolUseId": "t1", "name": "mock_tool", "input": {}}
-    events = [BidiToolUsesCompleteEvent({"role": "assistant", "content": [{"toolUse": tool_use}]})]
+    events = [
+        ToolUseStreamEvent(current_tool_use=tool_use, delta=""),
+        BidiToolUsesCompleteEvent({"role": "assistant", "content": [{"toolUse": tool_use}]}),
+    ]
     agent.model.receive = unittest.mock.Mock(return_value=agenerator(events))
 
     await loop.start()
@@ -281,18 +285,26 @@ async def test_tool_call_span_created(loop, agent, agenerator, otel_setup):
 @pytest.mark.asyncio
 async def test_tool_call_span_closed_on_error(loop, agent, agenerator, otel_setup):
     """Tool call span is closed with error status when tool execution raises."""
-    tool_use = {"toolUseId": "t1", "name": "mock_tool", "input": {}}
-    events = [BidiToolUsesCompleteEvent({"role": "assistant", "content": [{"toolUse": tool_use}]})]
+
+    @tool(name="failing_tool")
+    async def failing_tool() -> str:
+        raise RuntimeError("tool boom")
+
+    agent.tool_registry.register_tool(failing_tool)
+    tool_use = {"toolUseId": "t1", "name": "failing_tool", "input": {}}
+    events = [
+        ToolUseStreamEvent(current_tool_use=tool_use, delta=""),
+        BidiToolUsesCompleteEvent({"role": "assistant", "content": [{"toolUse": tool_use}]}),
+    ]
     agent.model.receive = unittest.mock.Mock(return_value=agenerator(events))
 
-    with unittest.mock.patch.object(ToolExecutor, "_stream", side_effect=RuntimeError("tool boom")):
-        await loop.start()
+    await loop.start()
 
-        with pytest.raises(RuntimeError, match="tool boom"):
-            async for _ in loop.receive():
-                pass
+    async for event in loop.receive():
+        if isinstance(event, ToolResultMessageEvent):
+            break
 
-        await loop.stop()
+    await loop.stop()
 
     spans = otel_setup.get_finished_spans()
     tool_spans = [s for s in spans if "execute_tool" in s.name]
@@ -303,10 +315,10 @@ async def test_tool_call_span_closed_on_error(loop, agent, agenerator, otel_setu
 @pytest.mark.asyncio
 async def test_connection_restart_span(loop, agent, agenerator, otel_setup):
     """Connection restart creates a span with error message."""
-    timeout_error = BidiModelTimeoutError("8 minute timeout")
-    text_event = BidiTextInputEvent(text="after restart")
+    timeout_error = ConnectionTimeoutError("8 minute timeout")
+    close_event = BidiConnectionStopEvent(connection_id="test", reason="complete")
 
-    agent.model.receive = unittest.mock.Mock(side_effect=[timeout_error, agenerator([text_event])])
+    agent.model.receive = unittest.mock.Mock(side_effect=[timeout_error, agenerator([close_event])])
 
     await loop.start()
 
@@ -328,7 +340,7 @@ async def test_connection_restart_span(loop, agent, agenerator, otel_setup):
 @pytest.mark.asyncio
 async def test_before_restart_hook_exception_propagates(loop, agent, agenerator):
     """A raising before-restart hook propagates out of receive() and leaves the send gate closed."""
-    timeout_error = BidiModelTimeoutError("8 minute timeout")
+    timeout_error = ConnectionTimeoutError("8 minute timeout")
     agent.model.receive = unittest.mock.Mock(side_effect=[timeout_error, agenerator([])])
 
     def raise_hook(event: BidiBeforeConnectionRestartEvent) -> None:
@@ -350,7 +362,7 @@ async def test_before_restart_hook_exception_propagates(loop, agent, agenerator)
 @pytest.mark.asyncio
 async def test_restart_failure_propagates_and_reports(loop, agent, agenerator):
     """A failed restart surfaces to receive(), keeps the gate closed, and fires the after-restart hook."""
-    timeout_error = BidiModelTimeoutError("8 minute timeout")
+    timeout_error = ConnectionTimeoutError("8 minute timeout")
     agent.model.receive = unittest.mock.Mock(side_effect=[timeout_error, agenerator([])])
     agent.model.restart = unittest.mock.AsyncMock(side_effect=ConnectionError("restart failed"))
 
@@ -371,19 +383,19 @@ async def test_restart_failure_propagates_and_reports(loop, agent, agenerator):
 
 
 @pytest.mark.asyncio
-async def test_interruption_event_recorded_on_session_span(loop, agent, agenerator, otel_setup):
-    """Interruption events are added to the session span."""
+async def test_barge_in_event_recorded_on_session_span(loop, agent, agenerator, otel_setup):
+    """Barge-in events are added to the session span."""
     events = [
         BidiResponseStartEvent(response_id="resp-3"),
-        BidiInterruptionEvent(reason="user_speech"),
-        BidiResponseCompleteEvent(response_id="resp-3", stop_reason="interrupted"),
+        BidiBargeInEvent(reason="user_speech"),
+        BidiResponseStopEvent(response_id="resp-3", stop_reason="barge_in"),
     ]
     agent.model.receive = unittest.mock.Mock(return_value=agenerator(events))
 
     await loop.start()
 
     async for event in loop.receive():
-        if isinstance(event, BidiResponseCompleteEvent):
+        if isinstance(event, BidiResponseStopEvent):
             break
 
     await loop.stop()
@@ -393,7 +405,9 @@ async def test_interruption_event_recorded_on_session_span(loop, agent, agenerat
     assert len(session_spans) == 1
 
     span_events = session_spans[0].events
-    assert any(ev.name == "bidi_interruption" for ev in span_events)
+    assert any(
+        event.name == "bidi_barge_in" and event.attributes["barge_in.reason"] == "user_speech" for event in span_events
+    )
 
 
 @pytest.mark.asyncio
@@ -434,22 +448,29 @@ async def test_usage_accumulation(loop, agent, agenerator, otel_setup):
 
 
 @pytest.mark.asyncio
-async def test_response_span_closed_on_model_error(loop, agent, otel_setup):
-    """Open response spans close with error status when model raises."""
+@pytest.mark.parametrize("remove_message", [False, True])
+async def test_response_span_closed_on_model_error(loop, agent, otel_setup, remove_message):
+    """Transcript cleanup preserves model errors and closes response spans."""
+    model_error = RuntimeError("model crashed")
 
     async def failing_receive():
         yield BidiResponseStartEvent(response_id="resp-err")
-        raise RuntimeError("model crashed")
+        yield BidiTranscriptStartEvent("user", "user-transcript")
+        if remove_message:
+            agent.messages.pop(0)
+        raise model_error
 
     agent.model.receive = unittest.mock.Mock(return_value=failing_receive())
 
     await loop.start()
-
-    with pytest.raises(RuntimeError, match="model crashed"):
-        async for _ in loop.receive():
-            pass
-
-    await loop.stop()
+    try:
+        with pytest.raises(RuntimeError, match="model crashed") as exc_info:
+            async for _ in loop.receive():
+                pass
+        assert exc_info.value is model_error
+        await loop._model_task
+    finally:
+        await loop.stop()
 
     spans = otel_setup.get_finished_spans()
     response_spans = [s for s in spans if "bidi_response" in s.name]
@@ -463,14 +484,14 @@ async def test_no_crash_without_otel_configured(loop, agent, agenerator):
     """Telemetry doesn't crash when OTel is not configured (no-op tracer)."""
     events = [
         BidiResponseStartEvent(response_id="resp-noop"),
-        BidiResponseCompleteEvent(response_id="resp-noop", stop_reason="complete"),
+        BidiResponseStopEvent(response_id="resp-noop", stop_reason="end_turn"),
     ]
     agent.model.receive = unittest.mock.Mock(return_value=agenerator(events))
 
     await loop.start()
 
     async for event in loop.receive():
-        if isinstance(event, BidiResponseCompleteEvent):
+        if isinstance(event, BidiResponseStopEvent):
             break
 
     await loop.stop()
