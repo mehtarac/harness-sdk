@@ -59,7 +59,7 @@ class BidiModel(Model, abc.ABC):
         return cast(str, self.get_config()["model_id"])
 
     def get_connection_config(self) -> ConnectionConfig:
-        """Get the configured reconnect timing, or an empty config if unspecified."""
+        """Get the configured restart timing, or an empty config if unspecified."""
         return cast(ConnectionConfig, self.get_config().get("connection", {}))
 
     def structured_output(self, *args: Any, **kwargs: Any) -> NoReturn:
@@ -71,6 +71,7 @@ class BidiModel(Model, abc.ABC):
         raise NotImplementedError("regular streaming is not supported by bidirectional models")
 
     @abc.abstractmethod
+    # pragma: no cover
     async def start(
         self,
         system_prompt: str | None = None,
@@ -93,6 +94,7 @@ class BidiModel(Model, abc.ABC):
         pass
 
     @abc.abstractmethod
+    # pragma: no cover
     async def stop(self) -> None:
         """Close the streaming connection and release resources.
 
@@ -103,6 +105,7 @@ class BidiModel(Model, abc.ABC):
         pass
 
     @abc.abstractmethod
+    # pragma: no cover
     def receive(self) -> AsyncIterable[BidiOutputEvent]:
         """Receive streaming events from the model.
 
@@ -119,6 +122,7 @@ class BidiModel(Model, abc.ABC):
         pass
 
     @abc.abstractmethod
+    # pragma: no cover
     async def send(self, content: BidiMessage | BidiContentDelta) -> None:
         """Send a complete message or an individual delta over the active connection.
 

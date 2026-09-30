@@ -443,10 +443,8 @@ class BidiAgent(LocalAgent):
 
         Raises:
             RuntimeError: If start has not been called.
-            ConnectionTimeoutError: If the model connection times out and automatic reconnect is
+            ConnectionTimeoutError: If the model connection times out and automatic restart is
                 disabled.
-            Exception: Any error from the model connection, a failed reconnect, or tool execution.
-                An exception raised by a tool is returned to the model as an error result instead.
         """
         if not self._started:
             raise RuntimeError("agent not started | call start before receiving")
@@ -583,11 +581,6 @@ class BidiAgent(LocalAgent):
             invocation_state: Optional context shared by reference with tools and hooks for the duration of run(),
                 including across connection restarts. Tools access it through ToolContext.invocation_state.
                 Defaults to a new empty dictionary.
-
-        Raises:
-            Exception: Any error from starting the agent or a stream, from ``receive()``, or from an
-                input or output stream call.
-            RuntimeError: If stopping the streams or the agent fails during cleanup.
 
         Example:
             ```python
