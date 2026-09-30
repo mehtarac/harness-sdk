@@ -7,7 +7,7 @@ InvokeModelWithBidirectionalStream protocol.
 Nova Sonic specifics:
 
 - Hierarchical event sequences: connectionStart → promptStart → content streaming
-- Base64-encoded audio format with hex encoding
+- Base64-encoded audio
 - Tool execution with content containers and identifier tracking
 - 8-minute connection limits with proper cleanup sequences
 - Barge-in detection through stopReason events

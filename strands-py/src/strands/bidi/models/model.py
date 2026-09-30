@@ -1,17 +1,4 @@
-"""Bidirectional streaming model interface.
-
-Defines the abstract interface for models that support real-time bidirectional
-communication with persistent connections. Unlike traditional request-response
-models, bidirectional models maintain an open connection for streaming audio,
-text, and tool interactions.
-
-Features:
-
-- Persistent connection management with connect/close lifecycle
-- Real-time bidirectional communication (send and receive simultaneously)
-- Provider-agnostic event normalization
-- Support for audio, text, image, and tool result streaming
-"""
+"""Bidirectional streaming model interface: start a persistent connection, send and receive concurrently, then stop."""
 
 import abc
 import logging
@@ -84,7 +71,6 @@ class BidiModel(Model, abc.ABC):
         raise NotImplementedError("regular streaming is not supported by bidirectional models")
 
     @abc.abstractmethod
-    # pragma: no cover
     async def start(
         self,
         system_prompt: str | None = None,
@@ -107,18 +93,16 @@ class BidiModel(Model, abc.ABC):
         pass
 
     @abc.abstractmethod
-    # pragma: no cover
     async def stop(self) -> None:
         """Close the streaming connection and release resources.
 
         Terminates the active bidirectional connection and cleans up any associated
         resources such as network connections, buffers, or background tasks. After
-        calling close(), the model instance cannot be used until start() is called again.
+        calling stop(), the model instance cannot be used until start() is called again.
         """
         pass
 
     @abc.abstractmethod
-    # pragma: no cover
     def receive(self) -> AsyncIterable[BidiOutputEvent]:
         """Receive streaming events from the model.
 
@@ -135,7 +119,6 @@ class BidiModel(Model, abc.ABC):
         pass
 
     @abc.abstractmethod
-    # pragma: no cover
     async def send(self, content: BidiMessage | BidiContentDelta) -> None:
         """Send a complete message or an individual delta over the active connection.
 

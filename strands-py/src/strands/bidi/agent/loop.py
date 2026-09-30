@@ -205,7 +205,12 @@ class _AgentLoop:
         self._arm_reconnect_timer()
 
     async def stop(self) -> None:
-        """Stop the agent loop."""
+        """Stop the agent loop.
+
+        Closes the send gate and cancels the reconnect timer, then cancels background tasks (the
+        model reader and running tools) and stops the model. The session span is ended and
+        ``BidiAgentStopEvent`` fires even if teardown fails.
+        """
         logger.debug("agent loop stopping")
 
         self._started = False
@@ -308,8 +313,8 @@ class _AgentLoop:
                             restart_event=restart_event,
                         )
                     except Exception:
-                        # The restart event was queued before the failing swap. Surface it before
-                        # preserving the existing behavior of raising the restart failure.
+                        # The restart event was queued before the failing swap. Surface it, then
+                        # raise the restart failure to the caller.
                         yield self._event_queue.get_nowait()
                         raise
                     continue
@@ -346,7 +351,7 @@ class _AgentLoop:
             return
         self._reconnect_timer.arm(deadline_s, _MODEL_RESTART_WARNING_S)
 
-    async def _on_reconnect_warning(self, time_left_s: int) -> None:
+    async def _on_reconnect_warning(self, time_left_s: float) -> None:
         """Timer callback: surface an approaching-reconnect warning to the receiver."""
         logger.debug("time_left_s=<%.1f> | emitting connection warning", time_left_s)
         await self._event_queue.put(BidiConnectionWarningEvent(time_left_s=time_left_s))
@@ -384,7 +389,7 @@ class _AgentLoop:
             await asyncio.wait_for(self._turn_complete.wait(), timeout=_MODEL_RESTART_TURN_TIMEOUT_S)
         except asyncio.TimeoutError:
             logger.debug(
-                "no turn boundary within %.1fs | forcing reconnect",
+                "timeout_s=<%.1f> | no turn boundary, forcing reconnect",
                 _MODEL_RESTART_TURN_TIMEOUT_S,
             )
 

@@ -2,14 +2,6 @@
 
 Implements the BidiModel interface for Google's Gemini Live API using the
 official Google GenAI SDK for simplified and robust WebSocket communication.
-
-Key improvements over custom WebSocket implementation:
-
-- Uses official google-genai SDK with native Live API support
-- Simplified session management with client.aio.live.connect()
-- Built-in tool integration and event handling
-- Automatic WebSocket connection management and error handling
-- Native support for audio/text streaming and barge-in
 """
 
 import base64
@@ -753,7 +745,7 @@ class GoogleGeminiLiveModel(BidiModel, AudioCapable):
             "input_audio_transcription": {},
             # Sliding-window context compression removes the ~15-min audio-only session cap, so a
             # session resumed across proactive reconnects can continue indefinitely rather than
-            # dying at the cap (gemini_session.md).
+            # dying at the cap.
             "context_window_compression": {"sliding_window": {}},
         }
 
@@ -761,7 +753,7 @@ class GoogleGeminiLiveModel(BidiModel, AudioCapable):
         config_dict["session_resumption"] = {"handle": live_session_handle}
 
         # Enables send_client_content for initial history seeding before realtime mode.
-        # Not supported on Vertex AI; HistoryConfig requires google-genai>=1.67 (floor bump tracked separately).
+        # Not supported on Vertex AI.
         has_messages = kwargs.get("has_messages", False)
         if has_messages and getattr(self._client, "vertexai", False) is not True:
             config_dict["history_config"] = {"initial_history_in_client_content": True}
