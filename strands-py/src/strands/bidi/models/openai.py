@@ -594,7 +594,7 @@ class OpenAIRealtimeModel(BidiModel, AudioCapable):
         state = state if state is not None else self._session_state
 
         if event_type == "input_audio_buffer.speech_started":
-            events: list[BidiOutputEvent] = [BidiBargeInEvent(reason="user_speech")]
+            events: list[BidiOutputEvent] = [BidiBargeInEvent()]
             if state.transcription_enabled:
                 events.extend(state.start_transcript("user", openai_event["item_id"]))
             return events

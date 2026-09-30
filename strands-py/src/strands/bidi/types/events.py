@@ -523,25 +523,11 @@ class BidiTranscriptBlockEvent(TypedEvent):
 
 
 class BidiBargeInEvent(TypedEvent):
-    """Stop current response generation or playback while the session continues.
+    """Stop current response generation or playback while the session continues."""
 
-    Args:
-        reason: Why response output should stop.
-    """
-
-    def __init__(self, reason: Literal["user_speech", "error"]):
+    def __init__(self) -> None:
         """Initialize barge-in event."""
-        super().__init__(
-            {
-                "type": "bidi_barge_in",
-                "reason": reason,
-            }
-        )
-
-    @property
-    def reason(self) -> Literal["user_speech", "error"]:
-        """Why response output should stop."""
-        return cast(Literal["user_speech", "error"], self["reason"])
+        super().__init__({"type": "bidi_barge_in"})
 
 
 class BidiResponseStopEvent(TypedEvent):
@@ -672,13 +658,13 @@ class BidiConnectionStopEvent(TypedEvent):
 
     Args:
         connection_id: Unique identifier for this streaming connection (matches BidiConnectionStartEvent).
-        reason: Why the connection was closed.
+        reason: Why the connection was closed. ``"user_request"`` after ``agent.cancel()`` takes effect.
     """
 
     def __init__(
         self,
         connection_id: str,
-        reason: Literal["client_disconnect", "timeout", "error", "complete", "user_request"],
+        reason: Literal["user_request"],
     ):
         """Initialize connection stop event."""
         super().__init__(
@@ -695,9 +681,9 @@ class BidiConnectionStopEvent(TypedEvent):
         return cast(str, self["connection_id"])
 
     @property
-    def reason(self) -> Literal["client_disconnect", "timeout", "error", "complete", "user_request"]:
+    def reason(self) -> Literal["user_request"]:
         """Why the connection was closed."""
-        return cast(Literal["client_disconnect", "timeout", "error", "complete", "user_request"], self["reason"])
+        return cast(Literal["user_request"], self["reason"])
 
 
 # ============================================================================

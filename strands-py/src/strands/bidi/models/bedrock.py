@@ -890,7 +890,7 @@ class BedrockNovaSonicModel(BidiModel, AudioCapable):
             if stop_reason == "INTERRUPTED":
                 # The user holds the turn until Nova answers, even if the response already ended.
                 response_state.idle.clear()
-                events.append(BidiBargeInEvent("user_speech"))
+                events.append(BidiBargeInEvent())
                 if response_state.response_id is not None:
                     events.extend(self._complete_response(response_state))
                 return events

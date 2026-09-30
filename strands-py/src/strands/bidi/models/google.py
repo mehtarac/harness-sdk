@@ -455,7 +455,7 @@ class GoogleGeminiLiveModel(BidiModel, AudioCapable):
         events: list[BidiOutputEvent] = []
 
         if server_content.interrupted:
-            events.append(BidiBargeInEvent(reason="user_speech"))
+            events.append(BidiBargeInEvent())
 
         input_transcript = server_content.input_transcription
         if input_transcript and input_transcript.text:

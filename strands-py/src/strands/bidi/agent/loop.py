@@ -689,12 +689,12 @@ class _AgentLoop:
 
                 elif isinstance(event, BidiBargeInEvent):
                     if self._session_span:
-                        _telemetry.add_barge_in_event(self._session_span, event["reason"])
+                        _telemetry.add_barge_in_event(self._session_span)
 
                     # A barge-in ends the current response; the user's next turn owes a reply.
                     self._response_active = False
                     self._update_turn_state()
-                    await self._agent.hooks.invoke_callbacks_async(BidiBargeInHookEvent(self._agent, event["reason"]))
+                    await self._agent.hooks.invoke_callbacks_async(BidiBargeInHookEvent(self._agent))
 
                 elif isinstance(event, BidiResponseStopEvent):
                     if response_span:
