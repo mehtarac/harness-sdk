@@ -83,7 +83,7 @@ to talk over the agent, stop it from hearing its own voice, and give it a tool.
   />
   <LinkCard
     title="Choose a model"
-    href="models/"
+    href="models/bedrock/"
     description="Compare Nova Sonic, Gemini Live, and OpenAI Realtime."
   />
   <LinkCard
@@ -104,12 +104,7 @@ to talk over the agent, stop it from hearing its own voice, and give it a tool.
   <LinkCard
     title="Handle stream events"
     href="events/"
-    description="Show transcripts, track tool results, and react as things happen."
-  />
-  <LinkCard
-    title="Tune barge-in"
-    href="barge-in/"
-    description="Control what happens when a user talks over the agent."
+    description="Show transcripts, track tool results, and handle barge-in."
   />
   <LinkCard
     title="Register hooks"
@@ -121,8 +116,12 @@ to talk over the agent, stop it from hearing its own voice, and give it a tool.
     href="session-management/"
     description="Save a conversation and pick it up later."
   />
+  <LinkCard
+    title="Observe your agent"
+    href="observability/"
+    description="Trace connections, measure latency, and log conversations."
+  />
 </CardGrid>
 
-`BidiAgent` works with Strands [tools](../tools/index.mdx) and
-[observability](observability.mdx). Plugins and [interrupts](interrupts.mdx) aren't
-supported yet.
+`BidiAgent` works with Strands [tools](../tools/index.mdx). Plugins and
+[interrupts](interrupts.mdx) aren't supported yet.
