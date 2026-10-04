@@ -1,6 +1,6 @@
 ---
 title: Bidirectional streaming
-description: "Build Strands agents that take input while they respond. BidiAgent streams audio, text, and images both ways over one open connection, with tools."
+description: "Build Strands agents that take input while they respond. BidiAgent streams audio and text both ways, accepts image input, and runs your tools."
 languages: [python]
 tags: [bidi-streaming]
 sidebar:
@@ -96,6 +96,11 @@ to talk over the agent, stop it from hearing its own voice, and give it a tool.
     href="content/"
     description="Learn what you can send to the agent and how to format it."
   />
+  <LinkCard
+    title="Add tools"
+    href="../tools/"
+    description="Give the agent tools it can call while the conversation continues."
+  />
 </CardGrid>
 
 ## Shape the conversation
@@ -122,6 +127,3 @@ to talk over the agent, stop it from hearing its own voice, and give it a tool.
     description="Trace connections, measure latency, and log conversations."
   />
 </CardGrid>
-
-`BidiAgent` works with Strands [tools](../tools/index.mdx). Plugins and
-[interrupts](interrupts.mdx) aren't supported yet.
