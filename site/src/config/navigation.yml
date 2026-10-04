@@ -409,10 +409,11 @@ sidebar:
             items:
               - label: "Overview"
                 slug: docs/user-guide/sdk/bidi
-              - docs/user-guide/sdk/bidi/quickstart
               - docs/user-guide/sdk/bidi/agent
               - label: Models
                 items:
+                  - label: "Overview"
+                    slug: docs/user-guide/sdk/bidi/models
                   - docs/user-guide/sdk/bidi/models/bedrock
                   - docs/user-guide/sdk/bidi/models/google
                   - docs/user-guide/sdk/bidi/models/openai
