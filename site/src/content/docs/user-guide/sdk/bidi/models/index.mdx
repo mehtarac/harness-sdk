@@ -1,5 +1,5 @@
 ---
-title: Bidirectional streaming models
+title: Bidirectional Streaming Models
 description: "Realtime models for BidiAgent: the providers Strands supports, and the configuration, audio, and connection behavior they share."
 languages: [python]
 tags: [bidi-streaming]
@@ -18,8 +18,7 @@ streaming protocol into Strands events, so tools, hooks, I/O streams, and event
 handling work the same whichever service you choose.
 
 Realtime models are a separate family from the models a standard `Agent` uses, and
-each provider class works only with `BidiAgent`. Bidirectional streaming is available
-in the Python SDK.
+each provider class works only with `BidiAgent`.
 
 ## Supported providers
 
@@ -90,6 +89,7 @@ it emits, see [Connection restart](../agent.mdx#connection-restart).
 
 To connect a realtime model Strands doesn't support yet, subclass `BidiModel`. A
 provider opens and closes the connection, sends user input and tool results, and
-yields Strands events as the model responds. See the
+yields Strands events as the model responds, in the order described in
+[Event ordering](../events.mdx#event-ordering). See the
 [`BidiModel` API reference](@api/python/strands.bidi.models#BidiModel) for the
 contract, and the built-in providers in `strands/bidi/models/` for working examples.
