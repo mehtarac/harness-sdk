@@ -54,7 +54,7 @@ from strands.vended_tools import notebook
 
 async def main() -> None:
     model = BedrockNovaSonicModel(
-        model_id="amazon.nova-2-sonic-v1:0",
+        model_id="amazon.nova-2-5-sonic",
         region="us-east-1",
         voice="tiffany",
     )
@@ -109,7 +109,7 @@ boto_session = boto3.Session(
     profile_name="your_profile"  # Optional: Use a specific profile
 )
 model = BedrockNovaSonicModel(
-    model_id="amazon.nova-2-sonic-v1:0",
+    model_id="amazon.nova-2-5-sonic",
     boto_session=boto_session,
 )
 ```
@@ -129,7 +129,7 @@ For more details on this approach, please refer to the [boto3 session docs](http
 
 | Parameter | Description | Example | Options |
 | --------- | ----------- | ------- | ------- |
-| `model_id` | Nova Sonic model identifier. | `"amazon.nova-2-sonic-v1:0"` | Nova Sonic model IDs |
+| `model_id` | Nova Sonic model identifier. | `"amazon.nova-2-5-sonic"` | Nova Sonic model IDs |
 | `audio` | Input and output stream options. | `{"output": {"sample_rate": 24000}}` | [reference](@api/python/strands.bidi.models#strands.bidi.models.BedrockNovaSonicAudioConfig) |
 | `voice` | Output voice identifier. Defaults to `"matthew"`. | `"tiffany"` | Nova Sonic voices |
 | `params` | Provider-specific session parameters, such as inference and turn detection configuration. | `{"inferenceConfiguration": {"temperature": 0.7}}` | [`sessionStart` fields](https://docs.aws.amazon.com/nova/latest/nova2-userguide/sonic-input-events.html) |
