@@ -1,0 +1,185 @@
+---
+title: Structured output behavior
+description: >-
+  How a Strands agent turns your schema into a tool, validates the model's input,
+  retries on errors, and when it raises.
+sidebar:
+  label: "Structured output"
+tags: [structured-output, error-handling]
+sourceLinks:
+  - path: strands-py/src/strands/tools/structured_output/structured_output_tool.py
+  - path: strands-py/src/strands/event_loop/event_loop.py
+  - path: strands-ts/src/tools/structured-output-tool.ts
+  - path: strands-ts/src/agent/agent.ts
+---
+
+Strands validates every object before it reaches your code. When the model's input
+fails validation, or the model answers in text instead, Strands gives it another
+chance before raising an error. To start using structured output, see
+[Return structured output](./structured-output.md).
+
+## How a schema becomes a tool
+
+Strands doesn't ask the model to write JSON in its reply. The model returns the object
+by calling a tool with the field values as input. The tool gives the model a typed
+input schema to fill in, and gives Strands a way to send validation errors back
+through the [agent loop](./agent-loop.md).
+
+For each call with a schema:
+
+1. Strands adds a structured output tool, built from your schema, to the agent's tools.
+2. The model works as usual and can call your other tools along the way.
+3. The model calls the structured output tool with the field values.
+4. Strands validates that input. If it passes, the invocation ends and the object is on
+   <Syntax py="result.structured_output" ts="result.structuredOutput" />.
+5. Strands removes the structured output tool when the invocation ends.
+
+<Tabs>
+<Tab label="Python">
+
+The tool is named after your Pydantic class, so a `TicketTriage` schema produces a
+`TicketTriage` tool. The class docstring becomes the tool description, and each
+`Field(description=...)` describes that field to the model.
+
+</Tab>
+<Tab label="TypeScript">
+
+The tool is named `strands_structured_output`. A `.describe()` on the object becomes
+the tool description, and a `.describe()` on a field describes that field to the model.
+
+</Tab>
+</Tabs>
+
+Both SDKs add an instruction to the tool description telling the model to call the
+tool last, after any other tools it needs.
+
+## Validation errors
+
+A schema can hold rules the model won't always meet on the first try, like a check
+that a date is in the future. When the input fails validation, Strands doesn't raise.
+It returns the validation errors to the model as the tool result, and the model can
+call the tool again with corrected values.
+
+<Tabs>
+<Tab label="Python">
+
+```python
+from datetime import date
+
+from pydantic import BaseModel, field_validator
+from strands import Agent
+
+
+class FollowUp(BaseModel):
+    """A follow-up task for a support ticket."""
+
+    action: str
+    due_date: date
+
+    @field_validator("due_date")
+    @classmethod
+    def must_be_in_future(cls, value: date) -> date:
+        if value <= date.today():
+            raise ValueError(f"due_date must be after {date.today().isoformat()}")
+        return value
+
+
+agent = Agent(callback_handler=None)
+result = agent(
+    "Schedule a follow-up call with the customer next Tuesday.",
+    structured_output_model=FollowUp,
+)
+print(result.structured_output)
+```
+
+</Tab>
+<Tab label="TypeScript">
+
+```typescript
+--8<-- "user-guide/sdk/agents/structured-output-behavior_imports.ts:validation_imports"
+
+--8<-- "user-guide/sdk/agents/structured-output-behavior.ts:validation"
+```
+
+</Tab>
+</Tabs>
+
+The model doesn't know today's date, so its first guess can fail the check:
+
+```
+Example:
+1. Model calls the structured output tool with a due date of 2025-07-22
+2. Validation fails, and the model receives "due_date must be after 2026-10-12"
+3. Model calls the tool again with 2026-10-13
+4. Validation passes, and the invocation returns the object
+```
+
+Put rules like this in the schema, not in your prompt. The model sees the exact error
+message, so write it as an instruction the model can act on.
+
+## Forced tool call
+
+Sometimes the model ends its turn with a text reply and never calls the structured
+output tool. Strands then retries once with the structured output tool required, so
+the model's only option is to call it.
+
+<Tabs>
+<Tab label="Python">
+
+Before the retry, Strands adds a user message to the conversation:
+`You must format the previous response as structured output.` To replace it, pass
+`structured_output_prompt` to the agent or to a single call. The per-call value wins.
+
+```python
+from pydantic import BaseModel
+from strands import Agent
+
+
+class Contact(BaseModel):
+    name: str
+    email: str
+
+
+agent = Agent(
+    structured_output_prompt="Return the contact details you found as a Contact.",
+    callback_handler=None,
+)
+result = agent("Reach Dana Ruiz at dana@example.com.", structured_output_model=Contact)
+print(result.structured_output)
+```
+
+</Tab>
+<Tab label="TypeScript">
+
+Strands drops the text reply and retries with only the tool choice changed. No
+message is added, so there's no prompt to configure.
+
+</Tab>
+</Tabs>
+
+If the model still doesn't call the tool after the retry, the call raises
+<Syntax py="StructuredOutputException" ts="StructuredOutputError" /> with the message
+`The model failed to invoke the structured output tool even after it was forced.`
+Catch it where your application can fall back.
+[Return structured output](./structured-output.md#request-structured-output) shows an
+example.
+
+## Model provider support
+
+The model you use must support tool calls.
+The [model provider overview](../model-providers/index.md) lists support by provider.
+
+## Deprecated methods
+
+In the Python SDK, `Agent.structured_output()` and `Agent.structured_output_async()`
+are deprecated and emit a `DeprecationWarning`. Pass the schema to the call instead,
+and read the object from the result:
+
+```python
+# Deprecated
+contact = agent.structured_output(Contact, "Reach Dana Ruiz at dana@example.com.")
+
+# Current
+result = agent("Reach Dana Ruiz at dana@example.com.", structured_output_model=Contact)
+contact = result.structured_output
+```
