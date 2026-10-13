@@ -22,3 +22,27 @@ async function validationExample() {
   console.log(result.structuredOutput)
   // --8<-- [end:validation]
 }
+
+async function defaultSchemaExample() {
+  // --8<-- [start:defaults]
+  const CustomerInfoSchema = z.object({
+    name: z.string(),
+    email: z.string(),
+  })
+
+  const RefundRequestSchema = z.object({
+    orderId: z.string(),
+    amount: z.number(),
+  })
+
+  const agent = new Agent({ structuredOutputSchema: CustomerInfoSchema, printer: false })
+
+  const customer = await agent.invoke('This is Dana Ruiz, dana@example.com.')
+  const refund = await agent.invoke('Please refund order 4512. It was $49.99.', {
+    structuredOutputSchema: RefundRequestSchema,
+  })
+
+  console.log(customer.structuredOutput)
+  console.log(refund.structuredOutput)
+  // --8<-- [end:defaults]
+}

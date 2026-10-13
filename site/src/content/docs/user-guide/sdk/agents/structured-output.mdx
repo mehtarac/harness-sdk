@@ -15,14 +15,9 @@ You describe the fields you need in a schema, and the agent returns an object wi
 those fields, validated against the schema.
 
 A schema lists each field's name, type, and description. In Python, write it as a
-[Pydantic model](https://docs.pydantic.dev/latest/concepts/models/). In TypeScript,
-write it as a [Zod schema](https://zod.dev/).
-
-## Prerequisites
-
-- Strands installed, with access to a model. The [quickstart](../quickstart/overview.md)
-  covers both.
-- For TypeScript, Zod: `npm install zod`. Pydantic comes with `strands-agents`.
+[Pydantic model](https://docs.pydantic.dev/latest/concepts/models/), which installs with
+`strands-agents`. In TypeScript, write it as a [Zod schema](https://zod.dev/) and
+install Zod with `npm install zod`.
 
 ## Request structured output
 
@@ -102,8 +97,7 @@ If the agent doesn't return an object, the call raises
 and returns a ticket in the `other` category for a person to review.
 
 Invalid field values don't raise. Strands sends the validation errors back to the
-agent, and the agent corrects them. For details, see
-[Structured output behavior](./structured-output-behavior.md).
+agent, and the agent corrects them.
 
 ## Use tools
 
@@ -139,9 +133,12 @@ result = agent(
     structured_output_model=CustomerTicket,
 )
 print(result.structured_output)
+```
 
-# Typical output:
-# customer_name='Dana Ruiz' plan='enterprise' priority='high'
+Typical output:
+
+```
+customer_name='Dana Ruiz' plan='enterprise' priority='high'
 ```
 
 </Tab>
@@ -151,9 +148,12 @@ print(result.structured_output)
 --8<-- "user-guide/sdk/agents/structured-output_imports.ts:with_tools_imports"
 
 --8<-- "user-guide/sdk/agents/structured-output.ts:with_tools"
+```
 
-// Typical output:
-// { customerName: 'Dana Ruiz', plan: 'enterprise', priority: 'high' }
+Typical output:
+
+```
+{ customerName: 'Dana Ruiz', plan: 'enterprise', priority: 'high' }
 ```
 
 </Tab>
@@ -185,7 +185,10 @@ result = agent(
     "Summarize this conversation for the escalation team.",
     structured_output_model=Escalation,
 )
-print(result.structured_output)
+escalation = result.structured_output
+print(escalation.problem)
+for step in escalation.steps_tried:
+    print(f"- {step}")
 ```
 
 </Tab>
@@ -200,55 +203,13 @@ print(result.structured_output)
 </Tab>
 </Tabs>
 
-## Set a default schema
+Typical output:
 
-To have every call return the same object, set the schema when you create the agent. A
-schema passed to a single call replaces the default for that call only:
-
-<Tabs>
-<Tab label="Python">
-
-```python
-from pydantic import BaseModel
-from strands import Agent
-
-
-class CustomerInfo(BaseModel):
-    name: str
-    email: str
-
-
-class RefundRequest(BaseModel):
-    order_id: str
-    amount: float
-
-
-agent = Agent(structured_output_model=CustomerInfo, callback_handler=None)
-
-customer = agent("This is Dana Ruiz, dana@example.com.").structured_output
-refund = agent(
-    "Please refund order 4512. It was $49.99.",
-    structured_output_model=RefundRequest,
-).structured_output
-
-print(customer)
-print(refund)
 ```
-
-</Tab>
-<Tab label="TypeScript">
-
-```typescript
---8<-- "user-guide/sdk/agents/structured-output_imports.ts:defaults_imports"
-
---8<-- "user-guide/sdk/agents/structured-output.ts:defaults"
+The user is unable to log in and is not receiving password reset emails.
+- User reset their password twice but never received the reset email.
+- Agent suggested checking the spam folder for the reset email.
 ```
-
-</Tab>
-</Tabs>
-
-A default applies to every call, including turns that only build up context. If some
-calls should answer in plain text, pass the schema per call instead.
 
 ## Stream the response
 
@@ -298,9 +259,16 @@ asyncio.run(main())
 </Tab>
 </Tabs>
 
+Typical output:
+
+```
+I'd be happy to help draft a reply apologizing for a delayed refund!
+Subject: Apology for Your Delayed Refund
+```
+
 ## Next steps
 
-- [Structured output behavior](./structured-output-behavior.md): how a schema becomes a
-  tool, how validation retries work, and when errors are raised.
+- [Structured output](./structured-output-behavior.md): agent-level schemas, how a
+  schema becomes a tool, validation retries, and errors.
 - [Stream responses](../streaming/index.md): every event type a stream carries.
 - [Create custom tools](../tools/custom-tools.md): write tools like `lookup_customer`.

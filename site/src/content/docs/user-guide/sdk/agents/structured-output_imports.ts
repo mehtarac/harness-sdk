@@ -14,11 +14,6 @@ import { Agent } from '@strands-agents/sdk'
 import { z } from 'zod'
 // --8<-- [end:from_history_imports]
 
-// --8<-- [start:defaults_imports]
-import { Agent } from '@strands-agents/sdk'
-import { z } from 'zod'
-// --8<-- [end:defaults_imports]
-
 // --8<-- [start:streaming_imports]
 import { Agent } from '@strands-agents/sdk'
 import { z } from 'zod'

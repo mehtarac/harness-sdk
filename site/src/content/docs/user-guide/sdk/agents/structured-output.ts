@@ -84,32 +84,12 @@ async function fromHistoryExample() {
     'Summarize this conversation for the escalation team.',
     { structuredOutputSchema: EscalationSchema }
   )
-  console.log(result.structuredOutput)
+  const escalation = result.structuredOutput as z.infer<typeof EscalationSchema>
+  console.log(escalation.problem)
+  for (const step of escalation.stepsTried) {
+    console.log(`- ${step}`)
+  }
   // --8<-- [end:from_history]
-}
-
-async function defaultSchemaExample() {
-  // --8<-- [start:defaults]
-  const CustomerInfoSchema = z.object({
-    name: z.string(),
-    email: z.string(),
-  })
-
-  const RefundRequestSchema = z.object({
-    orderId: z.string(),
-    amount: z.number(),
-  })
-
-  const agent = new Agent({ structuredOutputSchema: CustomerInfoSchema, printer: false })
-
-  const customer = await agent.invoke('This is Dana Ruiz, dana@example.com.')
-  const refund = await agent.invoke('Please refund order 4512. It was $49.99.', {
-    structuredOutputSchema: RefundRequestSchema,
-  })
-
-  console.log(customer.structuredOutput)
-  console.log(refund.structuredOutput)
-  // --8<-- [end:defaults]
 }
 
 async function streamingExample() {
