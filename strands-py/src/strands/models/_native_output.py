@@ -25,25 +25,27 @@ _SUPPORTED_STRING_FORMATS = frozenset(
 _SUBSCHEMA_MAPS = ("properties", "$defs", "definitions")
 _SUBSCHEMA_LISTS = ("anyOf", "oneOf", "allOf")
 
-# Error substrings meaning the model cannot be forced to call a tool (Claude on Anthropic and Bedrock; Bedrock models
-# without tool choice support).
+# Providers report these cases only as a generic 400, so the message text is the only signal. "Documented" entries are
+# published provider error text; "observed" entries were seen in live responses and may change wording.
+
+# Error substrings meaning the model cannot be forced to call a tool.
 _FORCED_TOOL_CHOICE_UNSUPPORTED_MESSAGES = (
-    'tool_choice: type "tool" and "any" are not supported',
-    "doesn't support the toolConfig.toolChoice",
+    'tool_choice: type "tool" and "any" are not supported',  # documented: Anthropic API errors, forced tool use
+    "doesn't support the toolConfig.toolChoice",  # observed: Bedrock models without tool choice support
 )
 
 # Error substrings meaning the model has no native structured output.
 _NATIVE_OUTPUT_UNSUPPORTED_MESSAGES = (
-    "doesn't support the outputConfig field",
-    "output_config.format: Extra inputs are not permitted",
+    "doesn't support the outputConfig field",  # observed: Bedrock models without structured output
+    "output_config.format: Extra inputs are not permitted",  # observed: Claude models without structured output
 )
 
 # Error substrings meaning native structured output cannot express the schema or request.
 _NATIVE_OUTPUT_REJECTED_MESSAGES = (
-    "output_config.format.schema",
-    "Schemas contains too many",
-    "Schema is too complex",
-    "Citations cannot be enabled when output format is set",
+    "output_config.format.schema",  # observed: unsupported JSON Schema keyword
+    "Schemas contains too many",  # observed: optional or union parameter limit
+    "Schema is too complex",  # documented: Anthropic structured outputs, schema complexity limits
+    "Citations cannot be enabled when output format is set",  # observed: citations with native output
 )
 
 
