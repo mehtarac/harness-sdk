@@ -1048,7 +1048,10 @@ class BedrockModel(Model):
             variant["toolConfig"] = {**request["toolConfig"], "toolChoice": auto}
         variant.update(self._get_additional_request_fields(auto))
         if mechanism == "native":
-            variant["outputConfig"] = _native_output_config(structured_output_model)
+            variant["outputConfig"] = {
+                **request.get("outputConfig", {}),
+                **_native_output_config(structured_output_model),
+            }
         return variant
 
     @staticmethod
