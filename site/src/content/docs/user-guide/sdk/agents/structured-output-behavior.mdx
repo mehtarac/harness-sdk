@@ -11,6 +11,8 @@ sourceLinks:
   - path: strands-ts/src/agent/agent.ts
 ---
 
+import Diagram from '@components/Diagram.astro'
+
 Structured output makes an agent return a validated object instead of text. You define
 a schema, attach it to an agent or to a single call, and read the object from the
 result. For a worked example, see [Return structured output](./structured-output.md).
@@ -21,6 +23,11 @@ Strands doesn't ask the model to write JSON in its reply. It turns your schema i
 tool, and the model returns the object by calling that tool with the field values as
 input. The tool gives the model a typed input schema to fill in, and gives Strands a
 way to send validation errors back through the [agent loop](./agent-loop.md).
+
+<Diagram
+  name="structured-output-flow"
+  alt="How structured output works. Your schema is given to the model as a tool, inside the agent loop. The model calls the structured output tool, which validates the call's arguments against the schema. If validation fails, the errors go back to the model so it can retry. When the arguments are valid, the validated object is placed on the agent result."
+/>
 
 For each call with a schema:
 
