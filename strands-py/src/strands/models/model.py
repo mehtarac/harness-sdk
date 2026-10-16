@@ -287,7 +287,11 @@ class Model(abc.ABC):
             agent_metadata: Stable identity of the invoking agent (e.g. its session id), supplied per
                 request. A provider may consult it to derive a prompt-cache routing key; None when the
                 model is streamed directly without an agent.
-            **kwargs: Additional keyword arguments for future extensibility.
+            **kwargs: Additional keyword arguments for future extensibility. The agent passes
+                ``structured_output_model`` when the call must produce structured output; the response must then be
+                either a call to the tool named in ``tool_choice`` or a final text response that validates against
+                that model. A provider may enforce this however its model allows, or ignore the option and rely on
+                ``tool_choice``.
 
         Yields:
             Formatted message chunks from the model.

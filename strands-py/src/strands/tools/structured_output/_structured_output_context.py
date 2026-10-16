@@ -1,10 +1,13 @@
 """Context management for structured output in the event loop."""
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
+from ...types.content import Message
+from ...types.exceptions import StructuredOutputException
 from ...types.tools import ToolChoice, ToolSpec, ToolUse
 from .structured_output_tool import StructuredOutputTool
 
@@ -14,6 +17,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 DEFAULT_STRUCTURED_OUTPUT_PROMPT = "You must format the previous response as structured output."
+
+_FORCED_STRUCTURED_OUTPUT_FAILED_MESSAGE = (
+    "The model failed to invoke the structured output tool even after it was forced."
+)
 
 
 class StructuredOutputContext:
@@ -130,6 +137,42 @@ class StructuredOutputContext:
                     logger.debug("Extracted structured output for %s", tool_use.get("name"))
                     return result
         return None
+
+    def result_from_text(self, message: Message, stop_reason: str) -> BaseModel:
+        """Validate the final text of the forced retry as structured output.
+
+        A provider that cannot force the structured output tool may return the result as JSON text instead.
+
+        Args:
+            message: The assistant message that ended the forced retry.
+            stop_reason: Why the model stopped generating.
+
+        Returns:
+            The validated structured output.
+
+        Raises:
+            StructuredOutputException: If the model stopped for another reason, or its text is not valid
+                structured output.
+        """
+        if stop_reason != "end_turn":
+            raise StructuredOutputException(
+                f"The model stopped with stop_reason=<{stop_reason}> instead of producing structured output."
+            )
+
+        text = "".join(block.get("text", "") for block in message.get("content", []))
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            data = None
+        if self.structured_output_model is None or not isinstance(data, dict):
+            raise StructuredOutputException(_FORCED_STRUCTURED_OUTPUT_FAILED_MESSAGE)
+
+        try:
+            return self.structured_output_model(**data)
+        except ValidationError as error:
+            raise StructuredOutputException(
+                f"Structured output failed validation for {self.structured_output_model.__name__}: {error}"
+            ) from error
 
     def register_tool(self, registry: "ToolRegistry") -> None:
         """Register the structured output tool with the registry.

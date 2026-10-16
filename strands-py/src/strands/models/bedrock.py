@@ -30,10 +30,18 @@ from ..types.exceptions import (
     ContextWindowOverflowException,
     ModelThrottledException,
     ProviderTokenCountError,
+    StructuredOutputException,
 )
 from ..types.streaming import CitationsDelta, StreamEvent
-from ..types.tools import ToolChoice, ToolSpec
+from ..types.tools import ToolChoice, ToolChoiceAuto, ToolSpec
 from ._defaults import resolve_config_metadata
+from ._native_output import (
+    StructuredOutputMechanism,
+    is_unsupported_mechanism_message,
+    native_output_json_schema,
+    structured_output_mechanisms,
+    to_native_output_schema,
+)
 from ._strict_schema import ensure_strict_json_schema
 from ._validation import _warn_on_deprecated_cache_tools, validate_config_keys
 from .model import BaseModelConfig, CacheConfig, CacheToolsConfig, Model
@@ -98,6 +106,45 @@ _SKIP_COUNT_TOKENS_MODELS: set[str] = set()
 def _clear_skip_count_tokens_cache() -> None:
     """Clear the cache of model IDs for which CountTokens API calls should be skipped."""
     _SKIP_COUNT_TOKENS_MODELS.clear()
+
+
+# Model IDs learned to lack each mechanism, so later requests skip it.
+_UNSUPPORTED_STRUCTURED_OUTPUT_MECHANISMS: dict[str, set[StructuredOutputMechanism]] = {}
+
+
+def _clear_structured_output_mechanism_cache() -> None:
+    """Clear the learned structured output mechanisms per model ID."""
+    _UNSUPPORTED_STRUCTURED_OUTPUT_MECHANISMS.clear()
+
+
+def _native_output_config(structured_output_model: type[BaseModel]) -> dict[str, Any]:
+    """Build the Converse outputConfig that constrains the response to the output model's schema.
+
+    Raises:
+        StructuredOutputException: If native structured output cannot represent the output model.
+    """
+    schema = to_native_output_schema(native_output_json_schema(structured_output_model))
+    return {
+        "textFormat": {
+            "type": "json_schema",
+            "structure": {"jsonSchema": {"schema": json.dumps(schema), "name": structured_output_model.__name__}},
+        }
+    }
+
+
+def _is_unsupported_mechanism_error(error: ClientError, mechanism: StructuredOutputMechanism) -> bool:
+    """Whether Bedrock rejected the request because the model does not support the mechanism.
+
+    Raises:
+        StructuredOutputException: If native structured output rejected the schema or request itself.
+    """
+    details = error.response.get("Error", {})
+    if details.get("Code") != "ValidationException":
+        return False
+    try:
+        return is_unsupported_mechanism_message(details.get("Message", ""), mechanism)
+    except StructuredOutputException as rejection:
+        raise rejection from error
 
 
 def _suppress_task_exception(task: "asyncio.Task[None]") -> None:
@@ -959,6 +1006,48 @@ class BedrockModel(Model):
 
         return cleaned_messages
 
+    def _converse_structured_output(
+        self,
+        converse_method: Callable[..., Any],
+        request: dict[str, Any],
+        structured_output_model: type[BaseModel],
+    ) -> Any:
+        """Send a structured output request with the strongest mechanism the model accepts.
+
+        Mechanisms the model rejects are remembered for the process, so later requests start at the one that works.
+        Rejections happen during request validation, before the model generates anything.
+        """
+        model_id = request["modelId"]
+        unsupported = _UNSUPPORTED_STRUCTURED_OUTPUT_MECHANISMS.setdefault(model_id, set())
+        mechanisms = structured_output_mechanisms(unsupported, request.get("toolConfig", {}).get("toolChoice"))
+        for mechanism in mechanisms[:-1]:
+            try:
+                return converse_method(**self._structured_output_request(request, mechanism, structured_output_model))
+            except ClientError as error:
+                if not _is_unsupported_mechanism_error(error, mechanism):
+                    raise
+                unsupported.add(mechanism)
+                logger.debug(
+                    "model_id=<%s>, mechanism=<%s> | model rejects structured output mechanism", model_id, mechanism
+                )
+        return converse_method(**self._structured_output_request(request, mechanisms[-1], structured_output_model))
+
+    def _structured_output_request(
+        self, request: dict[str, Any], mechanism: StructuredOutputMechanism, structured_output_model: type[BaseModel]
+    ) -> dict[str, Any]:
+        """Build the request for a structured output mechanism from the forced request."""
+        if mechanism == "forced":
+            return request
+
+        auto = cast(ToolChoice, {"auto": ToolChoiceAuto()})
+        variant = {key: value for key, value in request.items() if key != "additionalModelRequestFields"}
+        if "toolConfig" in request:
+            variant["toolConfig"] = {**request["toolConfig"], "toolChoice": auto}
+        variant.update(self._get_additional_request_fields(auto))
+        if mechanism == "native":
+            variant["outputConfig"] = _native_output_config(structured_output_model)
+        return variant
+
     @staticmethod
     def _separate_tool_result_turns(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Separate adjacent user turns rejected by some Bedrock models.
@@ -1430,6 +1519,7 @@ class BedrockModel(Model):
             tool_choice,
             kwargs.get("dynamic_trailing_blocks", 0),
             cancel_signal,
+            kwargs.get("structured_output_model"),
         )
         task = asyncio.create_task(thread)
         cancel_poll = asyncio.ensure_future(_poll_cancel_signal(cancel_signal)) if cancel_signal else None
@@ -1465,6 +1555,7 @@ class BedrockModel(Model):
         tool_choice: ToolChoice | None = None,
         dynamic_trailing_blocks: int = 0,
         cancel_signal: threading.Event | None = None,
+        structured_output_model: type[BaseModel] | None = None,
     ) -> None:
         """Stream conversation with the Bedrock model.
 
@@ -1480,10 +1571,13 @@ class BedrockModel(Model):
             dynamic_trailing_blocks: How many trailing blocks of the last user message are rebuilt on every
                 call, so the cache point goes ahead of them.
             cancel_signal: Event that stops the transfer at the next chunk boundary.
+            structured_output_model: Output model the call must produce; the request is then sent with the
+                strongest structured output mechanism the model supports.
 
         Raises:
             ContextWindowOverflowException: If the input exceeds the model's context window.
             ModelThrottledException: If the model service is throttling requests.
+            StructuredOutputException: If native structured output cannot express the output model or request.
         """
         try:
             logger.debug("formatting request")
@@ -1497,8 +1591,13 @@ class BedrockModel(Model):
             streaming = self.config.get("streaming", True)
             converse_method = self.client.converse_stream if streaming else self.client.converse
 
+            def send(request: dict[str, Any]) -> Any:
+                if structured_output_model is None:
+                    return converse_method(**request)
+                return self._converse_structured_output(converse_method, request, structured_output_model)
+
             try:
-                response = converse_method(**request)
+                response = send(request)
             except ClientError as error:
                 error_details = error.response.get("Error", {})
                 if error_details.get(
@@ -1514,7 +1613,7 @@ class BedrockModel(Model):
 
                 logger.debug("model_id=<%s> | separating tool result and conversation turns", model_id)
                 request = {**request, "messages": separated_messages}
-                response = converse_method(**request)
+                response = send(request)
                 self._tool_result_turn_separation_model_id = model_id
 
             logger.debug("got response from model")
@@ -1765,12 +1864,24 @@ class BedrockModel(Model):
             tool_specs=[tool_spec],
             system_prompt=system_prompt,
             tool_choice=cast(ToolChoice, {"any": {}}),
+            structured_output_model=output_model,
             **kwargs,
         )
         async for event in streaming.process_stream(response):
             yield event
 
         stop_reason, messages, _, _ = event["stop"]
+
+        # Native structured output returns the result as JSON text instead of a tool call.
+        if stop_reason == "end_turn":
+            text = "".join(block.get("text", "") for block in messages["content"])
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                data = None
+            if isinstance(data, dict):
+                yield {"output": output_model(**data)}
+                return
 
         if stop_reason != "tool_use":
             raise ValueError(f'Model returned stop_reason: {stop_reason} instead of "tool_use".')
