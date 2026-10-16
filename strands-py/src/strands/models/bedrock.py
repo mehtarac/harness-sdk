@@ -25,12 +25,12 @@ from .._exception_notes import add_exception_note
 from ..event_loop import streaming
 from ..tools import convert_pydantic_to_tool_spec
 from ..tools._tool_helpers import noop_tool
+from ..tools.structured_output._structured_output_context import json_object_from_message
 from ..types.content import CachePoint, ContentBlock, Messages, ReasoningContentBlock, SystemContentBlock
 from ..types.exceptions import (
     ContextWindowOverflowException,
     ModelThrottledException,
     ProviderTokenCountError,
-    StructuredOutputException,
 )
 from ..types.streaming import CitationsDelta, StreamEvent
 from ..types.tools import ToolChoice, ToolChoiceAuto, ToolSpec
@@ -38,9 +38,11 @@ from ._defaults import resolve_config_metadata
 from ._native_output import (
     StructuredOutputMechanism,
     is_unsupported_mechanism_message,
-    native_output_json_schema,
+    native_output_rejection,
+    record_unsupported_mechanism,
     structured_output_mechanisms,
     to_native_output_schema,
+    unsupported_mechanisms,
 )
 from ._strict_schema import ensure_strict_json_schema
 from ._validation import _warn_on_deprecated_cache_tools, validate_config_keys
@@ -108,22 +110,9 @@ def _clear_skip_count_tokens_cache() -> None:
     _SKIP_COUNT_TOKENS_MODELS.clear()
 
 
-# Model IDs learned to lack each mechanism, so later requests skip it.
-_UNSUPPORTED_STRUCTURED_OUTPUT_MECHANISMS: dict[str, set[StructuredOutputMechanism]] = {}
-
-
-def _clear_structured_output_mechanism_cache() -> None:
-    """Clear the learned structured output mechanisms per model ID."""
-    _UNSUPPORTED_STRUCTURED_OUTPUT_MECHANISMS.clear()
-
-
 def _native_output_config(structured_output_model: type[BaseModel]) -> dict[str, Any]:
-    """Build the Converse outputConfig that constrains the response to the output model's schema.
-
-    Raises:
-        StructuredOutputException: If native structured output cannot represent the output model.
-    """
-    schema = to_native_output_schema(native_output_json_schema(structured_output_model))
+    """Build the Converse outputConfig that constrains the response to the output model's schema."""
+    schema = to_native_output_schema(structured_output_model.model_json_schema())
     return {
         "textFormat": {
             "type": "json_schema",
@@ -141,10 +130,10 @@ def _is_unsupported_mechanism_error(error: ClientError, mechanism: StructuredOut
     details = error.response.get("Error", {})
     if details.get("Code") != "ValidationException":
         return False
-    try:
-        return is_unsupported_mechanism_message(details.get("Message", ""), mechanism)
-    except StructuredOutputException as rejection:
+    message = details.get("Message", "")
+    if mechanism == "native" and (rejection := native_output_rejection(message)):
         raise rejection from error
+    return is_unsupported_mechanism_message(message, mechanism)
 
 
 def _suppress_task_exception(task: "asyncio.Task[None]") -> None:
@@ -1018,24 +1007,38 @@ class BedrockModel(Model):
         Rejections happen during request validation, before the model generates anything.
         """
         model_id = request["modelId"]
-        unsupported = _UNSUPPORTED_STRUCTURED_OUTPUT_MECHANISMS.setdefault(model_id, set())
-        mechanisms = structured_output_mechanisms(unsupported, request.get("toolConfig", {}).get("toolChoice"))
+        mechanisms = structured_output_mechanisms(
+            unsupported_mechanisms("bedrock", model_id),
+            request.get("toolConfig", {}).get("toolChoice"),
+            structured_output_model,
+        )
+        if "native" in mechanisms and not self._client_supports_native_output():
+            warnings.warn(
+                "Native structured output requires botocore>=1.42.42; using auto tool choice instead", stacklevel=2
+            )
+            mechanisms.remove("native")
         for mechanism in mechanisms[:-1]:
             try:
                 return converse_method(**self._structured_output_request(request, mechanism, structured_output_model))
             except ClientError as error:
                 if not _is_unsupported_mechanism_error(error, mechanism):
                     raise
-                unsupported.add(mechanism)
-                logger.debug(
-                    "model_id=<%s>, mechanism=<%s> | model rejects structured output mechanism", model_id, mechanism
-                )
+                record_unsupported_mechanism("bedrock", model_id, mechanism)
         return converse_method(**self._structured_output_request(request, mechanisms[-1], structured_output_model))
+
+    def _client_supports_native_output(self) -> bool:
+        """Whether the installed botocore accepts the Converse outputConfig field, added in 1.42.42."""
+        operation = "ConverseStream" if self.config.get("streaming", True) else "Converse"
+        return "outputConfig" in self.client.meta.service_model.operation_model(operation).input_shape.members
 
     def _structured_output_request(
         self, request: dict[str, Any], mechanism: StructuredOutputMechanism, structured_output_model: type[BaseModel]
     ) -> dict[str, Any]:
-        """Build the request for a structured output mechanism from the forced request."""
+        """Build the request for a structured output mechanism from the forced request.
+
+        Converse has no tool choice that rules out tool calls, so on native and auto the model may still call another
+        tool; the agent loop runs it and the retry continues with the same mechanism.
+        """
         if mechanism == "forced":
             return request
 
@@ -1472,6 +1475,7 @@ class BedrockModel(Model):
         tool_choice: ToolChoice | None = None,
         system_prompt_content: list[SystemContentBlock] | None = None,
         cancel_signal: threading.Event | None = None,
+        structured_output_model: type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Stream conversation with the Bedrock model.
@@ -1488,6 +1492,8 @@ class BedrockModel(Model):
             cancel_signal: Event that aborts an in-flight streaming request. The caller stops
                 receiving events as soon as it is set, and the HTTP response is closed at the next
                 chunk boundary. A non-streaming request (``streaming=False``) is not abortable.
+            structured_output_model: Output model the call must produce; the request is then sent with the strongest
+                structured output mechanism the model supports.
             **kwargs: Additional keyword arguments for future extensibility.
 
         Yields:
@@ -1519,7 +1525,7 @@ class BedrockModel(Model):
             tool_choice,
             kwargs.get("dynamic_trailing_blocks", 0),
             cancel_signal,
-            kwargs.get("structured_output_model"),
+            structured_output_model,
         )
         task = asyncio.create_task(thread)
         cancel_poll = asyncio.ensure_future(_poll_cancel_signal(cancel_signal)) if cancel_signal else None
@@ -1577,7 +1583,7 @@ class BedrockModel(Model):
         Raises:
             ContextWindowOverflowException: If the input exceeds the model's context window.
             ModelThrottledException: If the model service is throttling requests.
-            StructuredOutputException: If native structured output cannot express the output model or request.
+            StructuredOutputException: If native structured output rejects the output model's schema or the request.
         """
         try:
             logger.debug("formatting request")
@@ -1873,15 +1879,9 @@ class BedrockModel(Model):
         stop_reason, messages, _, _ = event["stop"]
 
         # Native structured output returns the result as JSON text instead of a tool call.
-        if stop_reason == "end_turn":
-            text = "".join(block.get("text", "") for block in messages["content"])
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError:
-                data = None
-            if isinstance(data, dict):
-                yield {"output": output_model(**data)}
-                return
+        if stop_reason == "end_turn" and (data := json_object_from_message(messages)) is not None:
+            yield {"output": output_model(**data)}
+            return
 
         if stop_reason != "tool_use":
             raise ValueError(f'Model returned stop_reason: {stop_reason} instead of "tool_use".')

@@ -561,6 +561,13 @@ async def stream_messages(
     messages = [Message(role=msg["role"], content=msg["content"]) for msg in messages]
     start_time = time.time()
 
+    # Omitted when unset, so an ordinary call's arguments are unchanged.
+    optional_kwargs: dict[str, Any] = {}
+    if dynamic_trailing_blocks:
+        optional_kwargs["dynamic_trailing_blocks"] = dynamic_trailing_blocks
+    if structured_output_model:
+        optional_kwargs["structured_output_model"] = structured_output_model
+
     chunks = model.stream(
         messages,
         tool_specs if tool_specs else None,
@@ -571,9 +578,7 @@ async def stream_messages(
         model_state=model_state,
         cancel_signal=cancel_signal,
         agent_metadata=agent_metadata,
-        # Omitted when zero, so an ordinary call's arguments are unchanged.
-        **({"dynamic_trailing_blocks": dynamic_trailing_blocks} if dynamic_trailing_blocks else {}),
-        **({"structured_output_model": structured_output_model} if structured_output_model else {}),
+        **optional_kwargs,
     )
 
     async for event in process_stream(chunks, start_time, cancel_signal):

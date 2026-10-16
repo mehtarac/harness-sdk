@@ -1,14 +1,21 @@
 """JSON schema handling for native structured output (schema-constrained decoding)."""
 
+import logging
+from collections.abc import Set
 from typing import Any, Literal
 
 from pydantic import BaseModel
 
 from ..types.exceptions import StructuredOutputException
 
+logger = logging.getLogger(__name__)
+
 # Ways a provider can enforce a structured output request, strongest first.
 StructuredOutputMechanism = Literal["forced", "native", "auto"]
 STRUCTURED_OUTPUT_MECHANISMS: tuple[StructuredOutputMechanism, ...] = ("forced", "native", "auto")
+
+# Mechanisms each model was learned to reject, keyed by (provider, model_id), so later requests skip them.
+_UNSUPPORTED_MECHANISMS: dict[tuple[str, str], set[StructuredOutputMechanism]] = {}
 
 # String formats native structured output accepts; others are moved into the field description.
 _SUPPORTED_STRING_FORMATS = frozenset(
@@ -40,44 +47,60 @@ NATIVE_OUTPUT_REJECTED_MESSAGES = (
 )
 
 
+def unsupported_mechanisms(provider: str, model_id: str) -> Set[StructuredOutputMechanism]:
+    """The structured output mechanisms a model was learned to reject in this process."""
+    return _UNSUPPORTED_MECHANISMS.get((provider, model_id), set())
+
+
+def record_unsupported_mechanism(provider: str, model_id: str, mechanism: StructuredOutputMechanism) -> None:
+    """Remember that a model rejects a structured output mechanism, so later requests skip it."""
+    _UNSUPPORTED_MECHANISMS.setdefault((provider, model_id), set()).add(mechanism)
+    logger.debug(
+        "provider=<%s>, model_id=<%s>, mechanism=<%s> | model rejects structured output mechanism",
+        provider,
+        model_id,
+        mechanism,
+    )
+
+
+def clear_unsupported_mechanisms() -> None:
+    """Forget every learned structured output mechanism."""
+    _UNSUPPORTED_MECHANISMS.clear()
+
+
 def structured_output_mechanisms(
-    unsupported: set[StructuredOutputMechanism], tool_choice: dict[str, Any] | None
+    unsupported: Set[StructuredOutputMechanism],
+    tool_choice: dict[str, Any] | None,
+    output_model: type[BaseModel],
 ) -> list[StructuredOutputMechanism]:
     """List the mechanisms to try, strongest first.
+
+    Native output is skipped for output models it cannot represent, such as dict and tuple fields, so those models
+    fall back to auto: structured output is then best effort rather than guaranteed.
 
     Args:
         unsupported: Mechanisms the model is known to reject.
         tool_choice: The requested tool choice; forcing is only tried when it forces a tool.
+        output_model: The output model the response must produce.
 
     Returns:
         The mechanisms to try in order; never empty, since auto is always available.
     """
     forces_tool = tool_choice is not None and ("any" in tool_choice or "tool" in tool_choice)
+    feature = find_unsupported_native_output_feature(output_model.model_json_schema())
+    if feature and "native" not in unsupported:
+        logger.debug(
+            "output_model=<%s>, feature=<%s> | native structured output cannot represent the output model, skipping it",
+            output_model.__name__,
+            feature,
+        )
     return [
         mechanism
         for mechanism in STRUCTURED_OUTPUT_MECHANISMS
-        if mechanism not in unsupported and (mechanism != "forced" or forces_tool)
+        if mechanism not in unsupported
+        and (mechanism != "forced" or forces_tool)
+        and (mechanism != "native" or not feature)
     ]
-
-
-def native_output_json_schema(output_model: type[BaseModel]) -> dict[str, Any]:
-    """Get the output model's JSON schema for native structured output.
-
-    Args:
-        output_model: The output model the response must produce.
-
-    Returns:
-        The model's JSON schema, before conversion to the supported subset.
-
-    Raises:
-        StructuredOutputException: If native structured output cannot represent the output model.
-    """
-    schema = output_model.model_json_schema()
-    if feature := find_unsupported_native_output_feature(schema):
-        raise StructuredOutputException(
-            f"Native structured output cannot represent {output_model.__name__}: {feature} are not supported."
-        )
-    return schema
 
 
 def is_unsupported_mechanism_message(message: str, mechanism: StructuredOutputMechanism) -> bool:
@@ -89,26 +112,33 @@ def is_unsupported_mechanism_message(message: str, mechanism: StructuredOutputMe
 
     Returns:
         True if the model does not support the mechanism, so the next one should be tried.
-
-    Raises:
-        StructuredOutputException: If native structured output rejected the schema or request itself.
     """
     if mechanism == "forced":
         return any(signal in message for signal in FORCED_TOOL_CHOICE_UNSUPPORTED_MESSAGES)
-    if mechanism != "native":
-        return False
-    if any(signal in message for signal in NATIVE_OUTPUT_UNSUPPORTED_MESSAGES):
-        return True
-    if any(signal in message for signal in NATIVE_OUTPUT_REJECTED_MESSAGES):
-        raise StructuredOutputException(f"Native structured output rejected the request: {message}")
+    if mechanism == "native":
+        return any(signal in message for signal in NATIVE_OUTPUT_UNSUPPORTED_MESSAGES)
     return False
+
+
+def native_output_rejection(message: str) -> StructuredOutputException | None:
+    """The error to raise when native structured output rejected the schema or request itself.
+
+    Args:
+        message: The provider's error message for a native structured output request.
+
+    Returns:
+        The exception to raise, or None if the error is not such a rejection.
+    """
+    if any(signal in message for signal in NATIVE_OUTPUT_REJECTED_MESSAGES):
+        return StructuredOutputException(f"Native structured output rejected the request: {message}")
+    return None
 
 
 def find_unsupported_native_output_feature(schema: dict[str, Any]) -> str | None:
     """Find a schema feature that native structured output cannot represent without losing data.
 
     Native output requires ``additionalProperties: false`` on every object and has no tuple support, so dict and
-    tuple fields would be emptied or left unconstrained rather than rejected.
+    tuple fields would be emptied or left unconstrained rather than rejected. Such models must not use native output.
 
     Args:
         schema: A JSON schema, for example from ``BaseModel.model_json_schema()``.

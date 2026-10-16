@@ -18,6 +18,7 @@ from pydantic import BaseModel
 from typing_extensions import Required, Unpack, override
 
 from ..event_loop.streaming import process_stream
+from ..tools.structured_output._structured_output_context import json_object_from_message
 from ..tools.structured_output.structured_output_utils import convert_pydantic_to_tool_spec
 from ..types.citations import (
     DocumentCharLocationDict,
@@ -36,8 +37,10 @@ from ._defaults import resolve_config_metadata
 from ._native_output import (
     StructuredOutputMechanism,
     is_unsupported_mechanism_message,
-    native_output_json_schema,
+    native_output_rejection,
+    record_unsupported_mechanism,
     structured_output_mechanisms,
+    unsupported_mechanisms,
 )
 from ._validation import _has_location_source, _warn_on_deprecated_cache_tools, validate_config_keys
 from .model import BaseModelConfig, CacheConfig, CacheToolsConfig, Model
@@ -85,9 +88,6 @@ _CACHEABLE_BLOCK_TYPES = frozenset({"document", "image", "text", "tool_result", 
 # ``ephemeral`` is the only cache type the Anthropic API supports
 _ANTHROPIC_CACHE_TYPE = "ephemeral"
 
-# Model IDs learned to lack each structured output mechanism, so later requests skip it.
-_UNSUPPORTED_STRUCTURED_OUTPUT_MECHANISMS: dict[str, set[StructuredOutputMechanism]] = {}
-
 # The anthropic SDK added transform_schema and the output_config request parameter in 0.77.0.
 _SDK_SUPPORTS_NATIVE_OUTPUT = (
     hasattr(anthropic, "transform_schema")
@@ -96,11 +96,6 @@ _SDK_SUPPORTS_NATIVE_OUTPUT = (
         getattr(getattr(anthropic.resources, "AsyncMessages", None), "stream", lambda: None)
     ).parameters
 )
-
-
-def _clear_structured_output_mechanism_cache() -> None:
-    """Clear the learned structured output mechanisms per model ID."""
-    _UNSUPPORTED_STRUCTURED_OUTPUT_MECHANISMS.clear()
 
 
 def _mechanism_tool_choice(
@@ -117,16 +112,15 @@ def _with_native_output(
     mechanism: StructuredOutputMechanism | None,
     structured_output_model: type[BaseModel] | None,
 ) -> dict[str, Any]:
-    """Add the output model's schema as the native output format, keeping other output_config settings.
+    """Constrain the response to the output model's schema, keeping other output_config settings.
 
-    Raises:
-        StructuredOutputException: If native structured output cannot represent the output model.
+    tool_choice none keeps the tools array unchanged while ruling out tool calls, so the response is the JSON object.
     """
     if mechanism != "native" or structured_output_model is None:
         return request
-    schema = anthropic.transform_schema(native_output_json_schema(structured_output_model))
+    schema = anthropic.transform_schema(structured_output_model)
     output_config = {**request.get("output_config", {}), "format": {"type": "json_schema", "schema": schema}}
-    return {**request, "output_config": output_config}
+    return {**request, "tool_choice": {"type": "none"}, "output_config": output_config}
 
 
 class AnthropicModel(Model):
@@ -949,6 +943,7 @@ class AnthropicModel(Model):
         *,
         tool_choice: ToolChoice | None = None,
         system_prompt_content: list[SystemContentBlock] | None = None,
+        structured_output_model: type[BaseModel] | None = None,
         **kwargs: Any,
     ) -> AsyncGenerator[StreamEvent, None]:
         """Stream conversation with the Anthropic model.
@@ -959,6 +954,8 @@ class AnthropicModel(Model):
             system_prompt: Plain string system prompt. Ignored when system_prompt_content is provided.
             tool_choice: Selection strategy for tool invocation.
             system_prompt_content: Structured system prompt content blocks, which can carry a cache point.
+            structured_output_model: Output model the call must produce; the request is then sent with the strongest
+                structured output mechanism the model supports.
             **kwargs: Additional keyword arguments for future extensibility.
 
         Yields:
@@ -972,7 +969,6 @@ class AnthropicModel(Model):
             ModelThrottledException: If the request is throttled by Anthropic.
             RuntimeError: If a paused server-side tool turn is still paused after the continuation limit.
         """
-        structured_output_model: type[BaseModel] | None = kwargs.get("structured_output_model")
         mechanism = self._structured_output_mechanism(structured_output_model, tool_choice)
 
         logger.debug("formatting request")
@@ -1078,13 +1074,15 @@ class AnthropicModel(Model):
             if not self._record_rejected_mechanism(error, mechanism):
                 raise error
 
-            # Rejected before any chunk was yielded, so the request is resent with the next mechanism.
+            # A mechanism is rejected on a turn's first request, before any chunk is yielded; continuations reuse an
+            # accepted one. So the request can be resent with the next mechanism.
             async for retry_event in self.stream(
                 messages,
                 tool_specs,
                 system_prompt,
                 tool_choice=tool_choice,
                 system_prompt_content=system_prompt_content,
+                structured_output_model=structured_output_model,
                 **kwargs,
             ):
                 yield retry_event
@@ -1103,14 +1101,13 @@ class AnthropicModel(Model):
         Raises:
             StructuredOutputException: If native structured output rejected the schema or request itself.
         """
-        if mechanism is None or mechanism == "auto" or not is_unsupported_mechanism_message(str(error), mechanism):
+        if mechanism is None or mechanism == "auto":
             return False
-        _UNSUPPORTED_STRUCTURED_OUTPUT_MECHANISMS.setdefault(self.config["model_id"], set()).add(mechanism)
-        logger.debug(
-            "model_id=<%s>, mechanism=<%s> | model rejects structured output mechanism",
-            self.config["model_id"],
-            mechanism,
-        )
+        if mechanism == "native" and (rejection := native_output_rejection(str(error))):
+            raise rejection from error
+        if not is_unsupported_mechanism_message(str(error), mechanism):
+            return False
+        record_unsupported_mechanism("anthropic", self.config["model_id"], mechanism)
         return True
 
     def _structured_output_mechanism(
@@ -1119,8 +1116,11 @@ class AnthropicModel(Model):
         """Choose the strongest structured output mechanism not yet rejected for this model."""
         if structured_output_model is None:
             return None
-        unsupported = _UNSUPPORTED_STRUCTURED_OUTPUT_MECHANISMS.get(self.config["model_id"], set())
-        mechanism = structured_output_mechanisms(unsupported, cast(dict[str, Any] | None, tool_choice))[0]
+        mechanism = structured_output_mechanisms(
+            unsupported_mechanisms("anthropic", self.config["model_id"]),
+            cast(dict[str, Any] | None, tool_choice),
+            structured_output_model,
+        )[0]
         if mechanism == "native" and not _SDK_SUPPORTS_NATIVE_OUTPUT:
             warnings.warn(
                 "Native structured output requires anthropic>=0.77.0; using auto tool choice instead",
@@ -1160,15 +1160,9 @@ class AnthropicModel(Model):
         stop_reason, messages, _, _ = event["stop"]
 
         # Native structured output returns the result as JSON text instead of a tool call.
-        if stop_reason == "end_turn":
-            text = "".join(block.get("text", "") for block in messages["content"])
-            try:
-                data = json.loads(text)
-            except json.JSONDecodeError:
-                data = None
-            if isinstance(data, dict):
-                yield {"output": output_model(**data)}
-                return
+        if stop_reason == "end_turn" and (data := json_object_from_message(messages)) is not None:
+            yield {"output": output_model(**data)}
+            return
 
         if stop_reason != "tool_use":
             raise ValueError(f'Model returned stop_reason: {stop_reason} instead of "tool_use".')

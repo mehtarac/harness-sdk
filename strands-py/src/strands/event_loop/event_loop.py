@@ -366,8 +366,8 @@ async def event_loop_cycle(
             agent.event_loop_metrics.end_cycle(cycle_start_time, cycle_trace, attributes)
 
             # The forced retry may end in JSON text when the provider could not force the tool
-            if structured_output_context.force_attempted and stop_reason != "cancelled":
-                structured_output = structured_output_context.result_from_text(message, stop_reason)
+            if structured_output_context.force_attempted and stop_reason == "end_turn":
+                structured_output = structured_output_context.result_from_text(message)
                 yield StructuredOutputEvent(structured_output=structured_output)
                 tracer.end_event_loop_cycle_span(cycle_span, message)
                 yield EventLoopStopEvent(

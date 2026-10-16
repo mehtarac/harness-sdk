@@ -2,7 +2,7 @@
 
 import json
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ValidationError
 
@@ -18,8 +18,27 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_STRUCTURED_OUTPUT_PROMPT = "You must format the previous response as structured output."
 
-_FORCED_STRUCTURED_OUTPUT_FAILED_MESSAGE = (
-    "The model failed to invoke the structured output tool even after it was forced."
+
+def json_object_from_message(message: Message) -> dict[str, Any] | None:
+    """Parse a message's text as one JSON object, the form native structured output returns.
+
+    Args:
+        message: The assistant message to parse.
+
+    Returns:
+        The parsed object, or None if the text is not exactly one JSON object.
+    """
+    text = "".join(block.get("text", "") for block in message.get("content", []))
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+_NO_STRUCTURED_OUTPUT_MESSAGE = (
+    "The model did not produce structured output: it neither called the structured output tool nor returned a JSON "
+    "object."
 )
 
 
@@ -138,34 +157,24 @@ class StructuredOutputContext:
                     return result
         return None
 
-    def result_from_text(self, message: Message, stop_reason: str) -> BaseModel:
+    def result_from_text(self, message: Message) -> BaseModel:
         """Validate the final text of the forced retry as structured output.
 
-        A provider that cannot force the structured output tool may return the result as JSON text instead.
+        A provider that cannot force the structured output tool may return the result as JSON text instead. The text
+        must be exactly one JSON object.
 
         Args:
-            message: The assistant message that ended the forced retry.
-            stop_reason: Why the model stopped generating.
+            message: The assistant message that ended the forced retry with end_turn.
 
         Returns:
             The validated structured output.
 
         Raises:
-            StructuredOutputException: If the model stopped for another reason, or its text is not valid
-                structured output.
+            StructuredOutputException: If the text is not a JSON object or does not validate against the output model.
         """
-        if stop_reason != "end_turn":
-            raise StructuredOutputException(
-                f"The model stopped with stop_reason=<{stop_reason}> instead of producing structured output."
-            )
-
-        text = "".join(block.get("text", "") for block in message.get("content", []))
-        try:
-            data = json.loads(text)
-        except json.JSONDecodeError:
-            data = None
-        if self.structured_output_model is None or not isinstance(data, dict):
-            raise StructuredOutputException(_FORCED_STRUCTURED_OUTPUT_FAILED_MESSAGE)
+        data = json_object_from_message(message)
+        if self.structured_output_model is None or data is None:
+            raise StructuredOutputException(_NO_STRUCTURED_OUTPUT_MESSAGE)
 
         try:
             return self.structured_output_model(**data)
