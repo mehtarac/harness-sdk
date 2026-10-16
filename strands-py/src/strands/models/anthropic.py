@@ -36,9 +36,7 @@ from ..types.tools import ToolChoice, ToolChoiceAuto, ToolChoiceToolDict, ToolSp
 from ._defaults import resolve_config_metadata
 from ._native_output import (
     StructuredOutputMechanism,
-    is_unsupported_mechanism_message,
-    native_output_rejection,
-    record_unsupported_mechanism,
+    handle_rejected_mechanism,
     structured_output_mechanisms,
     unsupported_mechanisms,
 )
@@ -1101,14 +1099,9 @@ class AnthropicModel(Model):
         Raises:
             StructuredOutputException: If native structured output rejected the schema or request itself.
         """
-        if mechanism is None or mechanism == "auto":
+        if mechanism is None:
             return False
-        if mechanism == "native" and (rejection := native_output_rejection(str(error))):
-            raise rejection from error
-        if not is_unsupported_mechanism_message(str(error), mechanism):
-            return False
-        record_unsupported_mechanism("anthropic", self.config["model_id"], mechanism)
-        return True
+        return handle_rejected_mechanism("anthropic", self.config["model_id"], mechanism, error, str(error))
 
     def _structured_output_mechanism(
         self, structured_output_model: type[BaseModel] | None, tool_choice: ToolChoice | None

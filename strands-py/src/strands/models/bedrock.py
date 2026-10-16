@@ -37,9 +37,7 @@ from ..types.tools import ToolChoice, ToolChoiceAuto, ToolSpec
 from ._defaults import resolve_config_metadata
 from ._native_output import (
     StructuredOutputMechanism,
-    is_unsupported_mechanism_message,
-    native_output_rejection,
-    record_unsupported_mechanism,
+    handle_rejected_mechanism,
     structured_output_mechanisms,
     to_native_output_schema,
     unsupported_mechanisms,
@@ -121,7 +119,7 @@ def _native_output_config(structured_output_model: type[BaseModel]) -> dict[str,
     }
 
 
-def _is_unsupported_mechanism_error(error: ClientError, mechanism: StructuredOutputMechanism) -> bool:
+def _is_unsupported_mechanism_error(error: ClientError, mechanism: StructuredOutputMechanism, model_id: str) -> bool:
     """Whether Bedrock rejected the request because the model does not support the mechanism.
 
     Raises:
@@ -130,10 +128,7 @@ def _is_unsupported_mechanism_error(error: ClientError, mechanism: StructuredOut
     details = error.response.get("Error", {})
     if details.get("Code") != "ValidationException":
         return False
-    message = details.get("Message", "")
-    if mechanism == "native" and (rejection := native_output_rejection(message)):
-        raise rejection from error
-    return is_unsupported_mechanism_message(message, mechanism)
+    return handle_rejected_mechanism("bedrock", model_id, mechanism, error, details.get("Message", ""))
 
 
 def _suppress_task_exception(task: "asyncio.Task[None]") -> None:
@@ -1021,9 +1016,8 @@ class BedrockModel(Model):
             try:
                 return converse_method(**self._structured_output_request(request, mechanism, structured_output_model))
             except ClientError as error:
-                if not _is_unsupported_mechanism_error(error, mechanism):
+                if not _is_unsupported_mechanism_error(error, mechanism, model_id):
                     raise
-                record_unsupported_mechanism("bedrock", model_id, mechanism)
         return converse_method(**self._structured_output_request(request, mechanisms[-1], structured_output_model))
 
     def _client_supports_native_output(self) -> bool:

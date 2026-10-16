@@ -1,4 +1,4 @@
-"""JSON schema handling for native structured output (schema-constrained decoding)."""
+"""Structured output enforcement for model providers: mechanism order, learned support, and native output schemas."""
 
 import logging
 from collections.abc import Set
@@ -27,19 +27,19 @@ _SUBSCHEMA_LISTS = ("anyOf", "oneOf", "allOf")
 
 # Error substrings meaning the model cannot be forced to call a tool (Claude on Anthropic and Bedrock; Bedrock models
 # without tool choice support).
-FORCED_TOOL_CHOICE_UNSUPPORTED_MESSAGES = (
+_FORCED_TOOL_CHOICE_UNSUPPORTED_MESSAGES = (
     'tool_choice: type "tool" and "any" are not supported',
     "doesn't support the toolConfig.toolChoice",
 )
 
 # Error substrings meaning the model has no native structured output.
-NATIVE_OUTPUT_UNSUPPORTED_MESSAGES = (
+_NATIVE_OUTPUT_UNSUPPORTED_MESSAGES = (
     "doesn't support the outputConfig field",
     "output_config.format: Extra inputs are not permitted",
 )
 
 # Error substrings meaning native structured output cannot express the schema or request.
-NATIVE_OUTPUT_REJECTED_MESSAGES = (
+_NATIVE_OUTPUT_REJECTED_MESSAGES = (
     "output_config.format.schema",
     "Schemas contains too many",
     "Schema is too complex",
@@ -52,7 +52,7 @@ def unsupported_mechanisms(provider: str, model_id: str) -> Set[StructuredOutput
     return _UNSUPPORTED_MECHANISMS.get((provider, model_id), set())
 
 
-def record_unsupported_mechanism(provider: str, model_id: str, mechanism: StructuredOutputMechanism) -> None:
+def _record_unsupported_mechanism(provider: str, model_id: str, mechanism: StructuredOutputMechanism) -> None:
     """Remember that a model rejects a structured output mechanism, so later requests skip it."""
     _UNSUPPORTED_MECHANISMS.setdefault((provider, model_id), set()).add(mechanism)
     logger.debug(
@@ -87,8 +87,11 @@ def structured_output_mechanisms(
         The mechanisms to try in order; never empty, since auto is always available.
     """
     forces_tool = tool_choice is not None and ("any" in tool_choice or "tool" in tool_choice)
-    feature = find_unsupported_native_output_feature(output_model.model_json_schema())
-    if feature and "native" not in unsupported:
+    native_known_unsupported = "native" in unsupported
+    feature = (
+        None if native_known_unsupported else find_unsupported_native_output_feature(output_model.model_json_schema())
+    )
+    if feature:
         logger.debug(
             "output_model=<%s>, feature=<%s> | native structured output cannot represent the output model, skipping it",
             output_model.__name__,
@@ -103,35 +106,39 @@ def structured_output_mechanisms(
     ]
 
 
-def is_unsupported_mechanism_message(message: str, mechanism: StructuredOutputMechanism) -> bool:
-    """Whether a provider error means the model does not support a structured output mechanism.
+def handle_rejected_mechanism(
+    provider: str, model_id: str, mechanism: StructuredOutputMechanism, error: Exception, message: str
+) -> bool:
+    """Handle a provider error for a structured output request.
 
     Args:
-        message: The provider's error message.
+        provider: The provider that sent the request.
+        model_id: The model the request was sent to.
         mechanism: The mechanism the rejected request used.
+        error: The provider error, chained onto any exception raised here.
+        message: The provider's error message.
 
     Returns:
-        True if the model does not support the mechanism, so the next one should be tried.
+        True if the model does not support the mechanism, which is recorded so the next one should be tried; False if
+        the error is unrelated and should surface unchanged.
+
+    Raises:
+        StructuredOutputException: If native structured output rejected the schema or request itself.
     """
+    if mechanism == "native" and any(signal in message for signal in _NATIVE_OUTPUT_REJECTED_MESSAGES):
+        raise StructuredOutputException(f"Native structured output rejected the request: {message}") from error
+    if not _is_unsupported_mechanism_message(message, mechanism):
+        return False
+    _record_unsupported_mechanism(provider, model_id, mechanism)
+    return True
+
+
+def _is_unsupported_mechanism_message(message: str, mechanism: StructuredOutputMechanism) -> bool:
     if mechanism == "forced":
-        return any(signal in message for signal in FORCED_TOOL_CHOICE_UNSUPPORTED_MESSAGES)
+        return any(signal in message for signal in _FORCED_TOOL_CHOICE_UNSUPPORTED_MESSAGES)
     if mechanism == "native":
-        return any(signal in message for signal in NATIVE_OUTPUT_UNSUPPORTED_MESSAGES)
+        return any(signal in message for signal in _NATIVE_OUTPUT_UNSUPPORTED_MESSAGES)
     return False
-
-
-def native_output_rejection(message: str) -> StructuredOutputException | None:
-    """The error to raise when native structured output rejected the schema or request itself.
-
-    Args:
-        message: The provider's error message for a native structured output request.
-
-    Returns:
-        The exception to raise, or None if the error is not such a rejection.
-    """
-    if any(signal in message for signal in NATIVE_OUTPUT_REJECTED_MESSAGES):
-        return StructuredOutputException(f"Native structured output rejected the request: {message}")
-    return None
 
 
 def find_unsupported_native_output_feature(schema: dict[str, Any]) -> str | None:
@@ -165,10 +172,10 @@ def find_unsupported_native_output_feature(schema: dict[str, Any]) -> str | None
 def to_native_output_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Convert a JSON schema to the subset native structured output accepts.
 
-    Follows the transformation Anthropic's SDKs apply (``anthropic.transform_schema``), so both providers send the same
-    schema: objects get ``additionalProperties: false``, and keywords outside the supported subset are moved into the
-    field description, where the model can still follow them. Validate the result against the original model, which
-    still enforces every constraint.
+    Mirrors ``anthropic.transform_schema``, which ``AnthropicModel`` uses directly, for providers without the
+    ``anthropic`` package: objects get ``additionalProperties: false``, and keywords outside the supported subset are
+    moved into the field description, where the model can still follow them. Validate the result against the original
+    model, which still enforces every constraint.
 
     Args:
         schema: A JSON schema, for example from ``BaseModel.model_json_schema()``.
