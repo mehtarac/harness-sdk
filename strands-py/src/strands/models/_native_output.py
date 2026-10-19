@@ -1,12 +1,16 @@
-"""Structured output enforcement for model providers: mechanism order, learned support, and native output schemas."""
+"""Structured output enforcement for model providers: mechanism order, learned support, and native output schemas.
+
+What a model rejects is learned from its errors and kept for the life of the process, without eviction: support is a
+property of the model, and a stale entry costs at most a weaker mechanism. Records are single set insertions, made
+from the event loop (AnthropicModel) and from a worker thread (BedrockModel); concurrent records can only repeat one.
+"""
 
 import logging
+import warnings
 from collections.abc import Set
 from typing import Any, Literal
 
 from pydantic import BaseModel
-
-from ..types.exceptions import StructuredOutputException
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +21,9 @@ STRUCTURED_OUTPUT_MECHANISMS: tuple[StructuredOutputMechanism, ...] = ("forced",
 # Mechanisms each model was learned to reject, keyed by (provider, model_id), so later requests skip them.
 _UNSUPPORTED_MECHANISMS: dict[tuple[str, str], set[StructuredOutputMechanism]] = {}
 
+# Output models whose schema a model's native output rejected, as (provider, model_id, output_model).
+_REJECTED_NATIVE_SCHEMAS: set[tuple[str, str, type[BaseModel]]] = set()
+
 # String formats native structured output accepts; others are moved into the field description.
 _SUPPORTED_STRING_FORMATS = frozenset(
     {"date-time", "time", "date", "duration", "email", "hostname", "uri", "ipv4", "ipv6", "uuid"}
@@ -24,6 +31,8 @@ _SUPPORTED_STRING_FORMATS = frozenset(
 
 _SUBSCHEMA_MAPS = ("properties", "$defs", "definitions")
 _SUBSCHEMA_LISTS = ("anyOf", "oneOf", "allOf")
+# A schema node needs one of these to be representable; without them it accepts any value, as Any does.
+_SCHEMA_TYPE_KEYS = ("type", "anyOf", "oneOf", "allOf", "$ref")
 
 # Providers report these cases only as a generic 400, so the message text is the only signal. "Documented" entries are
 # published provider error text; "observed" entries were seen in live responses and may change wording.
@@ -49,9 +58,14 @@ _NATIVE_OUTPUT_REJECTED_MESSAGES = (
 )
 
 
-def unsupported_mechanisms(provider: str, model_id: str) -> Set[StructuredOutputMechanism]:
-    """The structured output mechanisms a model was learned to reject in this process."""
-    return _UNSUPPORTED_MECHANISMS.get((provider, model_id), set())
+def unsupported_mechanisms(
+    provider: str, model_id: str, output_model: type[BaseModel]
+) -> Set[StructuredOutputMechanism]:
+    """The structured output mechanisms a model was learned to reject for an output model in this process."""
+    unsupported = _UNSUPPORTED_MECHANISMS.get((provider, model_id), set())
+    if (provider, model_id, output_model) in _REJECTED_NATIVE_SCHEMAS:
+        return unsupported | {"native"}
+    return unsupported
 
 
 def _record_unsupported_mechanism(provider: str, model_id: str, mechanism: StructuredOutputMechanism) -> None:
@@ -63,11 +77,6 @@ def _record_unsupported_mechanism(provider: str, model_id: str, mechanism: Struc
         model_id,
         mechanism,
     )
-
-
-def clear_unsupported_mechanisms() -> None:
-    """Forget every learned structured output mechanism."""
-    _UNSUPPORTED_MECHANISMS.clear()
 
 
 def structured_output_mechanisms(
@@ -94,10 +103,10 @@ def structured_output_mechanisms(
         None if native_known_unsupported else find_unsupported_native_output_feature(output_model.model_json_schema())
     )
     if feature:
-        logger.debug(
-            "output_model=<%s>, feature=<%s> | native structured output cannot represent the output model, skipping it",
-            output_model.__name__,
-            feature,
+        warnings.warn(
+            f"Native structured output cannot represent {output_model.__name__} ({feature}); if the model cannot be "
+            "forced to call the structured output tool, structured output falls back to auto tool choice",
+            stacklevel=2,
         )
     return [
         mechanism
@@ -109,26 +118,31 @@ def structured_output_mechanisms(
 
 
 def handle_rejected_mechanism(
-    provider: str, model_id: str, mechanism: StructuredOutputMechanism, error: Exception, message: str
+    provider: str, model_id: str, mechanism: StructuredOutputMechanism, output_model: type[BaseModel], message: str
 ) -> bool:
     """Handle a provider error for a structured output request.
+
+    A rejection the model gives for every request is remembered per model; native output rejecting this output
+    model's schema or request is remembered for that output model only, and falls back to auto.
 
     Args:
         provider: The provider that sent the request.
         model_id: The model the request was sent to.
         mechanism: The mechanism the rejected request used.
-        error: The provider error, chained onto any exception raised here.
+        output_model: The output model the request had to produce.
         message: The provider's error message.
 
     Returns:
-        True if the model does not support the mechanism, which is recorded so the next one should be tried; False if
-        the error is unrelated and should surface unchanged.
-
-    Raises:
-        StructuredOutputException: If native structured output rejected the schema or request itself.
+        True if the rejection was recorded and the next mechanism should be tried; False if the error is unrelated and
+        should surface unchanged.
     """
     if mechanism == "native" and any(signal in message for signal in _NATIVE_OUTPUT_REJECTED_MESSAGES):
-        raise StructuredOutputException(f"Native structured output rejected the request: {message}") from error
+        _REJECTED_NATIVE_SCHEMAS.add((provider, model_id, output_model))
+        warnings.warn(
+            f"Native structured output rejected {output_model.__name__} ({message}); using auto tool choice instead",
+            stacklevel=2,
+        )
+        return True
     if not _is_unsupported_mechanism_message(message, mechanism):
         return False
     _record_unsupported_mechanism(provider, model_id, mechanism)
@@ -146,8 +160,9 @@ def _is_unsupported_mechanism_message(message: str, mechanism: StructuredOutputM
 def find_unsupported_native_output_feature(schema: dict[str, Any]) -> str | None:
     """Find a schema feature that native structured output cannot represent without losing data.
 
-    Native output requires ``additionalProperties: false`` on every object and has no tuple support, so dict and
-    tuple fields would be emptied or left unconstrained rather than rejected. Such models must not use native output.
+    Native output requires ``additionalProperties: false`` on every object, has no tuple support, and needs a type on
+    every node, so dict and tuple fields would be emptied or left unconstrained, and untyped fields such as ``Any``
+    cannot be converted. Such models must not use native output.
 
     Args:
         schema: A JSON schema, for example from ``BaseModel.model_json_schema()``.
@@ -156,9 +171,11 @@ def find_unsupported_native_output_feature(schema: dict[str, Any]) -> str | None
         A description of the first unsupported feature found, or None if the schema can be represented.
     """
     if "prefixItems" in schema:
-        return "tuple fields (prefixItems)"
-    if schema.get("additionalProperties") not in (None, False):
-        return "dict fields (additionalProperties)"
+        return "tuple fields"
+    if schema.get("additionalProperties") not in (None, False) or "patternProperties" in schema:
+        return "dict fields"
+    if not any(key in schema for key in _SCHEMA_TYPE_KEYS):
+        return "untyped fields (Any)"
 
     children: list[Any] = [value for key in _SUBSCHEMA_MAPS for value in schema.get(key, {}).values()]
     children.extend(value for key in _SUBSCHEMA_LISTS for value in schema.get(key, []))

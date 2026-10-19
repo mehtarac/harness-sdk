@@ -9,10 +9,12 @@ The event loop allows agents to:
 """
 
 import copy
+import functools
+import inspect
 import logging
 import uuid
 from collections.abc import AsyncGenerator, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from opentelemetry import trace as trace_api
 
@@ -48,7 +50,7 @@ from ..types.exceptions import (
     StructuredOutputException,
 )
 from ..types.streaming import StopReason
-from ..types.tools import ToolResult, ToolUse
+from ..types.tools import ToolChoiceToolDict, ToolResult, ToolSpec, ToolUse
 from ._recover_message_on_max_tokens_reached import recover_message_on_max_tokens_reached
 from ._retry import ModelRetryStrategy
 from .streaming import stream_messages
@@ -718,6 +720,27 @@ async def _handle_model_execution(
         raise EventLoopException(e, invocation_state["request_state"]) from e
 
 
+def _structured_output_request(ctx: InvokeModelContext) -> "tuple[list[ToolSpec], type[BaseModel] | None]":
+    """The tool specs and structured output model to send to the model serving this call.
+
+    On the structured output retry, a provider whose ``stream()`` declares ``structured_output_model`` enforces it
+    itself and receives the full tool list. Any other provider receives only the forced tool, since it may ignore
+    ``tool_choice``.
+    """
+    if ctx.structured_output_model is None or _enforces_structured_output(type(ctx.model)):
+        return ctx.tool_specs, ctx.structured_output_model
+    if not ctx.tool_choice or "tool" not in ctx.tool_choice:
+        return ctx.tool_specs, None
+    forced_tool = cast(ToolChoiceToolDict, ctx.tool_choice)["tool"]["name"]
+    return [tool_spec for tool_spec in ctx.tool_specs if tool_spec["name"] == forced_tool], None
+
+
+@functools.cache
+def _enforces_structured_output(model_class: type) -> bool:
+    stream = getattr(model_class, "stream", None)
+    return stream is not None and "structured_output_model" in inspect.signature(stream).parameters
+
+
 def _make_invoke_model_terminal(
     agent: "Agent", cycle_span: Any, tracer: Tracer, model_state: dict[str, Any]
 ) -> "Callable[[InvokeModelContext], AsyncGenerator[Any, None]]":
@@ -734,6 +757,7 @@ def _make_invoke_model_terminal(
         agent._observe_cancellation()
 
         system_prompt_str, system_prompt_content = split_system_prompt(ctx.system_prompt)
+        tool_specs, structured_output_model = _structured_output_request(ctx)
 
         model_id = ctx.model.config.get("model_id") if hasattr(ctx.model, "config") else None
         model_invoke_span = tracer.start_model_invoke_span(
@@ -750,7 +774,7 @@ def _make_invoke_model_terminal(
                     ctx.model,
                     system_prompt_str,
                     ctx.messages,
-                    ctx.tool_specs,
+                    tool_specs,
                     system_prompt_content=system_prompt_content,
                     tool_choice=ctx.tool_choice,
                     invocation_state=ctx.invocation_state,
@@ -758,7 +782,7 @@ def _make_invoke_model_terminal(
                     dynamic_trailing_blocks=ctx.dynamic_trailing_blocks,
                     cancel_signal=agent._cancel_signal,
                     agent_metadata=agent._metadata,
-                    structured_output_model=ctx.structured_output_model,
+                    structured_output_model=structured_output_model,
                 ):
                     yield event
 

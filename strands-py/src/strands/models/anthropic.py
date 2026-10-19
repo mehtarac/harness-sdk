@@ -5,9 +5,9 @@
 """
 
 import base64
-import inspect
 import json
 import logging
+import re
 import warnings
 from collections.abc import AsyncGenerator
 from typing import Any, TypeVar, cast
@@ -86,14 +86,8 @@ _CACHEABLE_BLOCK_TYPES = frozenset({"document", "image", "text", "tool_result", 
 # ``ephemeral`` is the only cache type the Anthropic API supports
 _ANTHROPIC_CACHE_TYPE = "ephemeral"
 
-# The anthropic SDK added transform_schema and the output_config request parameter in 0.77.0.
-_SDK_SUPPORTS_NATIVE_OUTPUT = (
-    hasattr(anthropic, "transform_schema")
-    and "output_config"
-    in inspect.signature(
-        getattr(getattr(anthropic.resources, "AsyncMessages", None), "stream", lambda: None)
-    ).parameters
-)
+# The anthropic SDK added the output_config request parameter in 0.77.0, after transform_schema (0.75.0).
+_SDK_SUPPORTS_NATIVE_OUTPUT = tuple(int(part) for part in re.findall(r"\d+", anthropic.__version__)[:2]) >= (0, 77)
 
 
 def _mechanism_tool_choice(
@@ -1069,11 +1063,12 @@ class AnthropicModel(Model):
             if any(overflow_message in str(error).lower() for overflow_message in AnthropicModel.OVERFLOW_MESSAGES):
                 raise ContextWindowOverflowException(str(error)) from error
 
-            if not self._record_rejected_mechanism(error, mechanism):
+            if not self._record_rejected_mechanism(error, mechanism, structured_output_model):
                 raise error
 
             # A mechanism is rejected on a turn's first request, before any chunk is yielded; continuations reuse an
-            # accepted one. So the request can be resent with the next mechanism.
+            # accepted one. So the request can be resent with the next mechanism, the same order BedrockModel tries
+            # in a loop.
             async for retry_event in self.stream(
                 messages,
                 tool_specs,
@@ -1089,19 +1084,21 @@ class AnthropicModel(Model):
         logger.debug("finished streaming response from model")
 
     def _record_rejected_mechanism(
-        self, error: anthropic.BadRequestError, mechanism: StructuredOutputMechanism | None
+        self,
+        error: anthropic.BadRequestError,
+        mechanism: StructuredOutputMechanism | None,
+        structured_output_model: type[BaseModel] | None,
     ) -> bool:
-        """Remember the mechanism as unsupported if the error says the model does not support it.
+        """Record a structured output rejection, so the request should be resent with the next mechanism.
 
         Returns:
-            True if the request should be resent with the next mechanism.
-
-        Raises:
-            StructuredOutputException: If native structured output rejected the schema or request itself.
+            True if the rejection was recorded; False if the error is unrelated and should surface unchanged.
         """
-        if mechanism is None:
+        if mechanism is None or structured_output_model is None:
             return False
-        return handle_rejected_mechanism("anthropic", self.config["model_id"], mechanism, error, str(error))
+        return handle_rejected_mechanism(
+            "anthropic", self.config["model_id"], mechanism, structured_output_model, str(error)
+        )
 
     def _structured_output_mechanism(
         self, structured_output_model: type[BaseModel] | None, tool_choice: ToolChoice | None
@@ -1110,7 +1107,7 @@ class AnthropicModel(Model):
         if structured_output_model is None:
             return None
         mechanism = structured_output_mechanisms(
-            unsupported_mechanisms("anthropic", self.config["model_id"]),
+            unsupported_mechanisms("anthropic", self.config["model_id"], structured_output_model),
             cast(dict[str, Any] | None, tool_choice),
             structured_output_model,
         )[0]

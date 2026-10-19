@@ -119,16 +119,14 @@ def _native_output_config(structured_output_model: type[BaseModel]) -> dict[str,
     }
 
 
-def _is_unsupported_mechanism_error(error: ClientError, mechanism: StructuredOutputMechanism, model_id: str) -> bool:
-    """Whether Bedrock rejected the request because the model does not support the mechanism.
-
-    Raises:
-        StructuredOutputException: If native structured output rejected the schema or request itself.
-    """
+def _is_unsupported_mechanism_error(
+    error: ClientError, mechanism: StructuredOutputMechanism, model_id: str, output_model: type[BaseModel]
+) -> bool:
+    """Whether Bedrock rejected the request because the model does not support the mechanism for this output model."""
     details = error.response.get("Error", {})
     if details.get("Code") != "ValidationException":
         return False
-    return handle_rejected_mechanism("bedrock", model_id, mechanism, error, details.get("Message", ""))
+    return handle_rejected_mechanism("bedrock", model_id, mechanism, output_model, details.get("Message", ""))
 
 
 def _suppress_task_exception(task: "asyncio.Task[None]") -> None:
@@ -999,11 +997,12 @@ class BedrockModel(Model):
         """Send a structured output request with the strongest mechanism the model accepts.
 
         Mechanisms the model rejects are remembered for the process, so later requests start at the one that works.
-        Rejections happen during request validation, before the model generates anything.
+        Rejections happen during request validation, before the model generates anything. AnthropicModel follows the
+        same order but resends through stream(), since its rejection arrives inside the stream.
         """
         model_id = request["modelId"]
         mechanisms = structured_output_mechanisms(
-            unsupported_mechanisms("bedrock", model_id),
+            unsupported_mechanisms("bedrock", model_id, structured_output_model),
             request.get("toolConfig", {}).get("toolChoice"),
             structured_output_model,
         )
@@ -1016,7 +1015,7 @@ class BedrockModel(Model):
             try:
                 return converse_method(**self._structured_output_request(request, mechanism, structured_output_model))
             except ClientError as error:
-                if not _is_unsupported_mechanism_error(error, mechanism, model_id):
+                if not _is_unsupported_mechanism_error(error, mechanism, model_id, structured_output_model):
                     raise
         return converse_method(**self._structured_output_request(request, mechanisms[-1], structured_output_model))
 
@@ -1040,7 +1039,10 @@ class BedrockModel(Model):
         variant = {key: value for key, value in request.items() if key != "additionalModelRequestFields"}
         if "toolConfig" in request:
             variant["toolConfig"] = {**request["toolConfig"], "toolChoice": auto}
+        # Rebuilt for auto to restore the thinking forcing strips; additional_args still wins, as in format_request.
         variant.update(self._get_additional_request_fields(auto))
+        if (user_fields := (self.config.get("additional_args") or {}).get("additionalModelRequestFields")) is not None:
+            variant["additionalModelRequestFields"] = user_fields
         if mechanism == "native":
             variant["outputConfig"] = {
                 **request.get("outputConfig", {}),
@@ -1580,7 +1582,6 @@ class BedrockModel(Model):
         Raises:
             ContextWindowOverflowException: If the input exceeds the model's context window.
             ModelThrottledException: If the model service is throttling requests.
-            StructuredOutputException: If native structured output rejects the output model's schema or the request.
         """
         try:
             logger.debug("formatting request")
