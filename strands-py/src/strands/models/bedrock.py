@@ -1048,7 +1048,9 @@ class BedrockModel(Model):
         )
         if "native" in mechanisms and not self._client_supports_native_output():
             warnings.warn(
-                "Native structured output requires botocore>=1.42.42; using auto tool choice instead", stacklevel=2
+                "Native structured output requires botocore>=1.42.42; if the model cannot be forced to call the "
+                "structured output tool, structured output falls back to auto tool choice",
+                stacklevel=2,
             )
             mechanisms.remove("native")
         for mechanism in mechanisms[:-1]:
