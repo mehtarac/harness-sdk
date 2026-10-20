@@ -213,6 +213,8 @@ class BedrockModel(Model):
     - Context window overflow detection
     """
 
+    _supports_structured_output = True
+
     class BedrockConfig(BaseModelConfig, total=False):
         """Configuration options for Bedrock models.
 

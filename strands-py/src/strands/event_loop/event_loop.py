@@ -9,8 +9,6 @@ The event loop allows agents to:
 """
 
 import copy
-import functools
-import inspect
 import logging
 import uuid
 import warnings
@@ -738,22 +736,15 @@ async def _handle_model_execution(
 def _structured_output_request(ctx: InvokeModelContext) -> "tuple[list[ToolSpec], type[BaseModel] | None]":
     """The tool specs and structured output model to send to the model serving this call.
 
-    On the structured output retry, a provider whose ``stream()`` declares ``structured_output_model`` enforces it
-    itself and receives the full tool list. Any other provider receives only the forced tool, since it may ignore
-    ``tool_choice``.
+    On the structured output retry, a provider that enforces structured output itself receives the full tool list.
+    Any other provider receives only the forced tool, since it may ignore ``tool_choice``.
     """
-    if ctx.structured_output_model is None or _enforces_structured_output(type(ctx.model)):
+    if ctx.structured_output_model is None or getattr(ctx.model, "_supports_structured_output", False) is True:
         return ctx.tool_specs, ctx.structured_output_model
     if not ctx.tool_choice or "tool" not in ctx.tool_choice:
         return ctx.tool_specs, None
     forced_tool = cast(ToolChoiceToolDict, ctx.tool_choice)["tool"]["name"]
     return [tool_spec for tool_spec in ctx.tool_specs if tool_spec["name"] == forced_tool], None
-
-
-@functools.cache
-def _enforces_structured_output(model_class: type) -> bool:
-    stream = getattr(model_class, "stream", None)
-    return stream is not None and "structured_output_model" in inspect.signature(stream).parameters
 
 
 def _make_invoke_model_terminal(

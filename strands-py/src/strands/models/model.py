@@ -191,6 +191,10 @@ class Model(abc.ABC):
     standardized way to configure and process requests for different AI model providers.
     """
 
+    # A provider that sets this enforces structured output itself: on the structured output retry it receives
+    # structured_output_model and the full tool list, instead of only the forced tool.
+    _supports_structured_output: bool = False
+
     @property
     def stateful(self) -> bool:
         """Whether the model manages conversation state server-side.
@@ -289,11 +293,9 @@ class Model(abc.ABC):
                 request. A provider may consult it to derive a prompt-cache routing key; None when the
                 model is streamed directly without an agent.
             structured_output_model: Output model this call must produce, passed by the agent on its structured
-                output retry only to providers whose ``stream()`` declares this parameter. Declaring it opts in to
-                enforcing structured output: the agent then sends the full tool list rather than only the forced
-                tool, and the response must be either a call to the tool named in ``tool_choice`` or a final text
-                response whose text is exactly one JSON object that validates against this model. Providers that
-                do not declare it receive only the forced tool, as before.
+                output retry to providers that enforce structured output themselves. The response must then be
+                either a call to the tool named in ``tool_choice`` or a final text response whose text is exactly one
+                JSON object that validates against this model.
             **kwargs: Additional keyword arguments for future extensibility.
 
         Yields:

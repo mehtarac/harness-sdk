@@ -119,6 +119,8 @@ def _with_native_output(
 class AnthropicModel(Model):
     """Anthropic model provider implementation."""
 
+    _supports_structured_output = True
+
     EVENT_TYPES = {
         "message_start",
         "content_block_start",
