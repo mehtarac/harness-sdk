@@ -43,6 +43,7 @@ from ._native_output import (
     unsupported_mechanisms,
 )
 from ._strict_schema import ensure_strict_json_schema
+from ._thinking_binding import THINKING_BINDING_BETA, is_thinking_binding_error, thinking_with_drop_block
 from ._validation import _warn_on_deprecated_cache_tools, validate_config_keys
 from .model import BaseModelConfig, CacheConfig, CacheToolsConfig, Model
 
@@ -189,6 +190,17 @@ DEFAULT_READ_TIMEOUT = 120
 _CANCEL_POLL_INTERVAL = 0.05
 
 
+def _fields_with_drop_block(fields: dict[str, Any]) -> dict[str, Any] | None:
+    """Return additional request fields that drop stale thinking blocks, or None if they cannot change."""
+    thinking = thinking_with_drop_block(fields.get("thinking"))
+    if thinking is None:
+        return None
+    betas = list(fields.get("anthropic_beta") or [])
+    if THINKING_BINDING_BETA not in betas:
+        betas.append(THINKING_BINDING_BETA)
+    return {**fields, "anthropic_beta": betas, "thinking": thinking}
+
+
 class BedrockModel(Model):
     """AWS Bedrock model provider implementation.
 
@@ -308,6 +320,7 @@ class BedrockModel(Model):
             include_tool_result_status="auto",
         )
         self._tool_result_turn_separation_model_id: str | None = None
+        self._drop_stale_thinking_model_id: str | None = None
         self.update_config(**model_config)
 
         logger.debug("config=<%s> | initializing", self.config)
@@ -537,7 +550,32 @@ class BedrockModel(Model):
                 return {"additionalModelRequestFields": fields_without_thinking}
             return {}
 
+        if self._drop_stale_thinking_model_id == self.config["model_id"]:
+            additional_fields = _fields_with_drop_block(additional_fields) or additional_fields
+
         return {"additionalModelRequestFields": additional_fields}
+
+    def _converse(self, converse_method: Callable[..., Any], request: dict[str, Any]) -> Any:
+        """Invoke the model, retrying once with drop_block when an edit before replayed thinking made it stale.
+
+        The retry turns drop_block on for every later request to this model, since the stale blocks stay in history.
+        """
+        try:
+            return converse_method(**request)
+        except ClientError as error:
+            fields = request.get("additionalModelRequestFields") or {}
+            error_code = error.response.get("Error", {}).get("Code")
+            is_binding_error = error_code == "ValidationException" and is_thinking_binding_error(error)
+            retry_fields = _fields_with_drop_block(fields) if is_binding_error else None
+            if retry_fields is None:
+                raise
+
+        logger.warning(
+            "model_id=<%s> | history edit invalidated replayed thinking blocks, retrying with drop_block",
+            request["modelId"],
+        )
+        self._drop_stale_thinking_model_id = request["modelId"]
+        return converse_method(**{**request, "additionalModelRequestFields": retry_fields})
 
     def _apply_system_cache_ttl(
         self, system_blocks: list[SystemContentBlock], tools_cache_point: list[dict[str, Any]]
@@ -1013,11 +1051,15 @@ class BedrockModel(Model):
             mechanisms.remove("native")
         for mechanism in mechanisms[:-1]:
             try:
-                return converse_method(**self._structured_output_request(request, mechanism, structured_output_model))
+                return self._converse(
+                    converse_method, self._structured_output_request(request, mechanism, structured_output_model)
+                )
             except ClientError as error:
                 if not _is_unsupported_mechanism_error(error, mechanism, model_id, structured_output_model):
                     raise
-        return converse_method(**self._structured_output_request(request, mechanisms[-1], structured_output_model))
+        return self._converse(
+            converse_method, self._structured_output_request(request, mechanisms[-1], structured_output_model)
+        )
 
     def _client_supports_native_output(self) -> bool:
         """Whether the installed botocore accepts the Converse outputConfig field, added in 1.42.42."""
@@ -1597,7 +1639,7 @@ class BedrockModel(Model):
 
             def send(request: dict[str, Any]) -> Any:
                 if structured_output_model is None:
-                    return converse_method(**request)
+                    return self._converse(converse_method, request)
                 return self._converse_structured_output(converse_method, request, structured_output_model)
 
             try:
